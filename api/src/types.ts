@@ -19,11 +19,21 @@ export interface Publication {
   _id?: ObjectId
   workspaceId: string
   assetId: ObjectId
+  title: string
   caption: string
   destinations: Platform[]
   status: PublicationStatus
   scheduledAt?: Date
   publishedAt?: Date
   createdAt: Date
+  updatedAt: Date
+}
+
+export interface Connection {
+  _id?: ObjectId
+  workspaceId: string
+  platform: Platform
+  accountName?: string
+  connectedAt?: Date
   updatedAt: Date
 }

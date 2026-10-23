@@ -12,6 +12,8 @@ export async function db() {
     await database.collection('assets').createIndex({ workspaceId: 1, createdAt: -1 })
     await database.collection('publications').createIndex({ workspaceId: 1, scheduledAt: 1 })
     await database.collection('publications').createIndex({ status: 1, scheduledAt: 1 })
+    await database.collection('assets').createIndex({ workspaceId: 1, createdAt: -1 })
+    await database.collection('connections').createIndex({ workspaceId: 1, platform: 1 }, { unique: true })
     await database.collection('socialConnections').createIndex({ workspaceId: 1, platform: 1 }, { unique: true })
     await database.collection('deliveryEvents').createIndex({ publicationId: 1, createdAt: -1 })
   }

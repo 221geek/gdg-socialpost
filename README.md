@@ -37,9 +37,14 @@ Les branches de publication attendent les applications développeur et autorisat
 | Route | Usage |
 | --- | --- |
 | `GET /health` | Vérifier l’API et MongoDB |
-| `GET/POST /v1/assets` | Référencer les médias stockés dans un object storage |
+| `GET/POST /v1/assets` | Lister ou référencer les médias |
+| `POST /v1/assets/upload` | Importer une image ou une vidéo dans le volume de l’API |
 | `GET/POST /v1/publications` | Lire et créer les brouillons |
 | `POST /v1/publications/:id/schedule` | Programmer une publication et créer le job différé |
 | `POST /v1/internal/deliveries/:publicationId` | Callback sécurisé de n8n par plateforme |
 
-Les fichiers ne transitent pas par MongoDB : l’API reçoit une `storageKey` et une URL provenant d’un stockage objet (S3, R2 ou équivalent). Cela garde MongoDB dédiée aux métadonnées et aux requêtes produit.
+Les fichiers ne transitent pas par MongoDB. Par défaut, ils sont enregistrés dans le volume persistant de l’API (`UPLOAD_DIR`) et servis sous `/media`. Pour plusieurs instances de l’API, remplacez cet adaptateur par un stockage objet S3/R2 : MongoDB reste dédiée aux métadonnées et aux requêtes produit.
+
+## Production Coolify
+
+Créez MongoDB, Redis, l’application `api/` (port `4000`, volume `/data/uploads`) et le worker `api/` avec la commande `node dist/worker.js` dans le même environnement. Configurez `PUBLIC_API_URL` avec le domaine de l’API et construisez le frontend avec `VITE_API_URL` égal à cette URL. Les deux services backend partagent `MONGODB_URI`, `REDIS_URL`, `N8N_PUBLISH_WEBHOOK_URL` et `N8N_SHARED_SECRET`.
