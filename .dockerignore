@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+node_modules
+api/node_modules
+api/dist
+dist
+n8n-data
+mongo-data
+redis-data
+README.md
