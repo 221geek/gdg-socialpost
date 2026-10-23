@@ -1,0 +1,92 @@
+services:
+  mongo:
+    image: mongo:8
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mongo-init:
+    image: mongo:8
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: "no"
+    command: >
+      mongosh --host mongo:27017 --eval
+      'try { rs.status() } catch (error) { rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]}) }'
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./api
+    command: npm run dev
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/relay?replicaSet=rs0
+      REDIS_URL: redis://redis:6379
+      N8N_PUBLISH_WEBHOOK_URL: http://n8n:5678/webhook/relay-publish
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./api:/app
+      - /app/node_modules
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./api
+    command: npm run worker
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/relay?replicaSet=rs0
+      REDIS_URL: redis://redis:6379
+      N8N_PUBLISH_WEBHOOK_URL: http://n8n:5678/webhook/relay-publish
+    volumes:
+      - ./api:/app
+      - /app/node_modules
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  n8n:
+    image: n8nio/n8n:latest
+    profiles: ["local-n8n"]
+    env_file: .env
+    environment:
+      N8N_RELAY_SHARED_SECRET: ${N8N_SHARED_SECRET}
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./n8n:/workflows:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
+  redis-data:
+  n8n-data:

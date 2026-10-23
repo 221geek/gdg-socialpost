@@ -1,0 +1,4 @@
+/* Product typography: deliberate sans serif hierarchy, no display serif. */
+.brand-mark{font-family:'Archivo',sans-serif!important;font-style:normal!important}
+.page-title-row h1,.section-title h2,.big-stat,.detail-copy h2,.composer h2,.overview-hero h2,.pulse-card h2,.best-card h2{font-family:'Archivo',sans-serif!important}
+.media-art{font-family:'Archivo',sans-serif!important}

@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.DS_Store
+api/node_modules
+api/dist
+n8n-data
+mongo-data
+redis-data
