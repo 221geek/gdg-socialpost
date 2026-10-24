@@ -2,7 +2,7 @@ import { createWriteStream } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
 import fastifyStatic from '@fastify/static'
@@ -10,6 +10,7 @@ import Fastify from 'fastify'
 import { ObjectId } from 'mongodb'
 import { z } from 'zod'
 import { config } from './config.js'
+import { decryptConnectionToken, encryptConnectionToken } from './connection-crypto.js'
 import { closeDatabase, db } from './database.js'
 import { queuePublication } from './queue.js'
 import { Asset, Connection, platforms, Publication } from './types.js'
@@ -28,6 +29,13 @@ const publicationInput = z.object({
   title: z.string().trim().min(1).max(120),
   caption: z.string().max(2200).default(''),
   destinations: z.array(z.enum(platforms)).min(1),
+})
+
+const oauthState = z.object({
+  workspaceId,
+  stateHash: z.string(),
+  provider: z.literal('instagram'),
+  expiresAt: z.date(),
 })
 
 const asId = (id: ObjectId | undefined) => id?.toHexString()
@@ -123,6 +131,99 @@ app.get('/v1/connections', async (request) => {
     const connection = saved.find((item) => item.platform === platform)
     return { platform, connected: Boolean(connection?.connectedAt), accountName: connection?.accountName, connectedAt: connection?.connectedAt?.toISOString() }
   }) }
+})
+
+app.get('/v1/auth/instagram', async (request, reply) => {
+  if (!config.INSTAGRAM_APP_ID || !config.INSTAGRAM_APP_SECRET) {
+    return reply.code(503).send({ error: 'La connexion Instagram n’est pas encore configurée sur le serveur.' })
+  }
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  const state = randomBytes(32).toString('base64url')
+  await (await db()).collection('oauthStates').insertOne(oauthState.parse({
+    workspaceId: id,
+    stateHash: createHash('sha256').update(state).digest('hex'),
+    provider: 'instagram',
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  }))
+  const authorizationUrl = new URL('https://www.instagram.com/oauth/authorize')
+  authorizationUrl.search = new URLSearchParams({
+    client_id: config.INSTAGRAM_APP_ID,
+    redirect_uri: config.INSTAGRAM_REDIRECT_URI,
+    response_type: 'code',
+    scope: 'instagram_business_basic,instagram_business_content_publish',
+    state,
+  }).toString()
+  return reply.redirect(authorizationUrl.toString())
+})
+
+app.get('/v1/auth/instagram/callback', async (request, reply) => {
+  const query = z.object({ code: z.string().optional(), state: z.string().optional(), error: z.string().optional() }).parse(request.query)
+  const resultUrl = new URL(config.WEB_ORIGIN)
+  resultUrl.searchParams.set('settings', 'connections')
+  if (query.error || !query.code || !query.state || !config.INSTAGRAM_APP_ID || !config.INSTAGRAM_APP_SECRET) {
+    resultUrl.searchParams.set('notice', 'instagram-error')
+    return reply.redirect(resultUrl.toString())
+  }
+  const stateHash = createHash('sha256').update(query.state).digest('hex')
+  const pending = await (await db()).collection('oauthStates').findOneAndDelete({ stateHash, provider: 'instagram', expiresAt: { $gt: new Date() } })
+  if (!pending) {
+    resultUrl.searchParams.set('notice', 'instagram-error')
+    return reply.redirect(resultUrl.toString())
+  }
+  try {
+    const form = new URLSearchParams({
+      client_id: config.INSTAGRAM_APP_ID,
+      client_secret: config.INSTAGRAM_APP_SECRET,
+      grant_type: 'authorization_code',
+      redirect_uri: config.INSTAGRAM_REDIRECT_URI,
+      code: query.code,
+    })
+    const exchange = await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form })
+    const exchanged = await exchange.json() as { access_token?: string, user_id?: string, error_type?: string, error_message?: string }
+    if (!exchange.ok || !exchanged.access_token) throw new Error(exchanged.error_message || exchanged.error_type || 'Échange du code refusé.')
+
+    let accessToken = exchanged.access_token
+    let expiresIn: number | undefined
+    const longLivedUrl = new URL('https://graph.instagram.com/access_token')
+    longLivedUrl.search = new URLSearchParams({ grant_type: 'ig_exchange_token', client_secret: config.INSTAGRAM_APP_SECRET, access_token: accessToken }).toString()
+    const longLived = await fetch(longLivedUrl)
+    if (longLived.ok) {
+      const value = await longLived.json() as { access_token?: string, expires_in?: number }
+      if (value.access_token) { accessToken = value.access_token; expiresIn = value.expires_in }
+    }
+
+    const profileUrl = new URL('https://graph.instagram.com/me')
+    profileUrl.search = new URLSearchParams({ fields: 'user_id,username', access_token: accessToken }).toString()
+    const profileResponse = await fetch(profileUrl)
+    const profile = profileResponse.ok ? await profileResponse.json() as { user_id?: string, id?: string, username?: string } : {}
+    const now = new Date()
+    await (await db()).collection<Connection>('connections').updateOne(
+      { workspaceId: pending.workspaceId as string, platform: 'instagram' },
+      { $set: {
+        accountName: profile.username || 'Compte Instagram',
+        externalAccountId: profile.user_id || profile.id || exchanged.user_id,
+        tokenCiphertext: encryptConnectionToken(accessToken),
+        tokenExpiresAt: expiresIn ? new Date(now.getTime() + expiresIn * 1000) : undefined,
+        connectedAt: now,
+        updatedAt: now,
+      } },
+      { upsert: true },
+    )
+    resultUrl.searchParams.set('notice', 'instagram-connected')
+  } catch (error) {
+    app.log.error(error, 'Instagram OAuth callback failed')
+    resultUrl.searchParams.set('notice', 'instagram-error')
+  }
+  return reply.redirect(resultUrl.toString())
+})
+
+app.get('/v1/internal/connections/:platform/token', async (request, reply) => {
+  if (request.headers['x-relay-secret'] !== config.N8N_SHARED_SECRET) return reply.code(401).send({ error: 'Non autorisé' })
+  const { platform } = z.object({ platform: z.literal('instagram') }).parse(request.params)
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  const connection = await (await db()).collection<Connection>('connections').findOne({ workspaceId: id, platform })
+  if (!connection?.tokenCiphertext) return reply.code(404).send({ error: 'Aucun compte Instagram connecté.' })
+  return { data: { accessToken: decryptConnectionToken(connection.tokenCiphertext), accountId: connection.externalAccountId, expiresAt: connection.tokenExpiresAt?.toISOString() } }
 })
 
 app.get('/v1/dashboard', async (request) => {

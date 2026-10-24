@@ -34,6 +34,9 @@ export interface Connection {
   workspaceId: string
   platform: Platform
   accountName?: string
+  externalAccountId?: string
+  tokenCiphertext?: string
+  tokenExpiresAt?: Date
   connectedAt?: Date
   updatedAt: Date
 }
