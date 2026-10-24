@@ -4,7 +4,7 @@ import {
   ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Clock3, FileVideo,
   FolderOpen, Grid2X2, Image, ImagePlus, LayoutDashboard, LoaderCircle,
   MoreHorizontal, Plus, Search, Send, Settings2, Upload, Video, X, AlertCircle,
-  BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart, LogOut, ShieldCheck, Users, Copy
+  BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart, LogOut, ShieldCheck, Users
 } from 'lucide-react'
 import './styles.css'
 import './pages.css'
@@ -41,24 +41,21 @@ function App() {
 }
 
 function AuthScreen({ onAuthenticated }) {
-  const invitation = useMemo(() => new URLSearchParams(window.location.search), [])
-  const activationToken = invitation.get('invite') || ''
-  const [mode, setMode] = useState(activationToken ? 'activate' : 'login')
-  const [email, setEmail] = useState(invitation.get('email') || '')
+  const [mode, setMode] = useState('login')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const submit = async (event) => {
     event.preventDefault(); setError('')
-    if (mode === 'activate' && !activationToken) { setError('Utilisez le lien d’invitation transmis par votre administrateur.'); return }
     if (mode === 'activate' && password !== confirmation) { setError('Les deux mots de passe doivent être identiques.'); return }
     setSaving(true)
     try {
-      const data = await request(mode === 'activate' ? '/v1/auth/activate' : '/v1/auth/session', { method: 'POST', body: JSON.stringify(mode === 'activate' ? { email, password, activationToken } : { email, password }) })
+      const data = await request(mode === 'activate' ? '/v1/auth/activate' : '/v1/auth/session', { method: 'POST', body: JSON.stringify({ email, password }) })
       onAuthenticated(data.user)
     } catch (cause) {
-      if (cause.code === 'PASSWORD_SETUP_REQUIRED') { setPassword(''); setError('Votre compte attend son activation. Utilisez le lien d’invitation reçu de votre administrateur.') }
+      if (cause.code === 'PASSWORD_SETUP_REQUIRED') { setMode('activate'); setPassword(''); setConfirmation(''); setError('Votre compte est prêt. Choisissez maintenant votre mot de passe.') }
       else if (cause.code === 'ACCOUNT_ACTIVE') { setMode('login'); setPassword(''); setConfirmation(''); setError('Ce compte est déjà activé. Connectez-vous avec votre mot de passe.') }
       else setError(cause.message)
     } finally { setSaving(false) }
@@ -167,11 +164,11 @@ function SettingsPage({ connections, session, onSignedOut }) {
 
 
 function TeamPanel() {
-  const [members, setMembers] = useState([]); const [email, setEmail] = useState(''); const [error, setError] = useState(''); const [saving, setSaving] = useState(false); const [inviteUrl, setInviteUrl] = useState('')
+  const [members, setMembers] = useState([]); const [email, setEmail] = useState(''); const [error, setError] = useState(''); const [saving, setSaving] = useState(false)
   const load = async () => { try { setMembers(await request('/v1/team')) } catch (cause) { setError(cause.message) } }
   useEffect(() => { load() }, [])
-  const invite = async (event) => { event.preventDefault(); setError(''); setInviteUrl(''); setSaving(true); try { const member = await request('/v1/team', { method: 'POST', body: JSON.stringify({ email, role: 'member' }) }); setInviteUrl(member.inviteUrl); setEmail(''); await load() } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
-  return <section className="surface team-card"><div className="section-title"><div><span className="eyebrow">ÉQUIPE</span><h2>Accès au back-office.</h2></div><Users size={18}/></div><p className="quiet-copy">Ajoutez une adresse, puis transmettez-lui son invitation personnelle. La personne choisira son premier mot de passe depuis ce lien.</p><form className="team-add" onSubmit={invite}><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="membre@entreprise.com" required /><button className="secondary-button" disabled={saving}><Plus size={14}/>{saving ? 'Ajout…' : 'Ajouter'}</button></form>{inviteUrl && <div className="invite-created"><span>Invitation prête — valable 7 jours.</span><button type="button" onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy size={13}/>Copier le lien</button></div>}{error && <p className="team-error">{error}</p>}<div className="team-list">{members.map((member) => <div className="team-member" key={member.id}><span className="team-avatar">{member.email.slice(0, 1).toUpperCase()}</span><span><b>{member.email}</b><small>{member.role === 'owner' ? 'Administrateur' : 'Membre'} · {member.passwordInitialized ? 'Compte activé' : 'Invitation à transmettre'}</small></span><span className={member.passwordInitialized ? 'connected-label' : 'pending-label'}>{member.passwordInitialized ? 'Actif' : 'En attente'}</span></div>)}</div></section>
+  const invite = async (event) => { event.preventDefault(); setError(''); setSaving(true); try { await request('/v1/team', { method: 'POST', body: JSON.stringify({ email, role: 'member' }) }); setEmail(''); await load() } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
+  return <section className="surface team-card"><div className="section-title"><div><span className="eyebrow">ÉQUIPE</span><h2>Accès au back-office.</h2></div><Users size={18}/></div><p className="quiet-copy">Ajoutez une adresse autorisée. La personne choisira son mot de passe à sa première connexion.</p><form className="team-add" onSubmit={invite}><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="membre@entreprise.com" required /><button className="secondary-button" disabled={saving}><Plus size={14}/>{saving ? 'Ajout…' : 'Ajouter'}</button></form>{error && <p className="team-error">{error}</p>}<div className="team-list">{members.map((member) => <div className="team-member" key={member.id}><span className="team-avatar">{member.email.slice(0, 1).toUpperCase()}</span><span><b>{member.email}</b><small>{member.role === 'owner' ? 'Administrateur' : 'Membre'} · {member.passwordInitialized ? 'Compte activé' : 'En attente de première connexion'}</small></span><span className={member.passwordInitialized ? 'connected-label' : 'pending-label'}>{member.passwordInitialized ? 'Actif' : 'En attente'}</span></div>)}</div></section>
 }
 
 function Composer({ assets, refresh, onClose, onCreated }) {

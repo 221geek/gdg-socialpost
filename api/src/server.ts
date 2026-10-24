@@ -12,7 +12,7 @@ import { ObjectId } from 'mongodb'
 import { z } from 'zod'
 import { config } from './config.js'
 import { decryptConnectionToken, encryptConnectionToken } from './connection-crypto.js'
-import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, invitationHash, INVITATION_TTL_MS, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
+import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
 import { closeDatabase, db } from './database.js'
 import { queuePublication } from './queue.js'
 import { Asset, Connection, platforms, Publication, User } from './types.js'
@@ -80,7 +80,6 @@ app.get('/health', async () => {
 })
 
 const authCredentials = z.object({ email: z.string().email(), password: z.string().min(12).max(256) })
-const activationCredentials = authCredentials.extend({ activationToken: z.string().min(32).max(256) })
 
 app.post('/v1/auth/session', { config: { rateLimit: { max: 8, timeWindow: '5 minutes' } } }, async (request, reply) => {
   const input = authCredentials.parse(request.body)
@@ -94,17 +93,16 @@ app.post('/v1/auth/session', { config: { rateLimit: { max: 8, timeWindow: '5 min
 })
 
 app.post('/v1/auth/activate', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (request, reply) => {
-  const input = activationCredentials.parse(request.body)
+  const input = authCredentials.parse(request.body)
   const database = await db()
   const email = normalizeEmail(input.email)
   const existing = await database.collection<User>('users').findOne({ email, status: 'active' })
   if (!existing) return reply.code(404).send({ error: 'Cette adresse e-mail n’est pas autorisée sur Relay.', code: 'ACCOUNT_NOT_FOUND' })
   if (existing.passwordHash) return reply.code(409).send({ error: 'Ce compte est déjà activé. Connectez-vous avec votre mot de passe.', code: 'ACCOUNT_ACTIVE' })
-  if (!existing.activationTokenHash || !existing.activationExpiresAt || existing.activationExpiresAt <= new Date() || existing.activationTokenHash !== invitationHash(input.activationToken)) return reply.code(401).send({ error: 'Cette invitation est invalide ou a expiré.', code: 'INVALID_INVITATION' })
   const now = new Date()
   const update = await database.collection<User>('users').findOneAndUpdate(
-    { _id: existing._id, passwordHash: { $exists: false }, activationTokenHash: invitationHash(input.activationToken) },
-    { $set: { passwordHash: await hashPassword(input.password), passwordSetAt: now, updatedAt: now }, $unset: { activationTokenHash: '', activationExpiresAt: '' } },
+    { _id: existing._id, passwordHash: { $exists: false } },
+    { $set: { passwordHash: await hashPassword(input.password), passwordSetAt: now, updatedAt: now } },
     { returnDocument: 'after' },
   )
   if (!update) return reply.code(409).send({ error: 'Ce compte vient d’être activé. Connectez-vous avec votre mot de passe.', code: 'ACCOUNT_ACTIVE' })
@@ -137,13 +135,9 @@ app.post('/v1/team', async (request, reply) => {
   const email = normalizeEmail(input.email)
   const now = new Date()
   try {
-    const activationToken = randomBytes(32).toString('base64url')
-    const result = await (await db()).collection<User>('users').insertOne({ email, role: roleFrom(input.role), status: 'active', activationTokenHash: invitationHash(activationToken), activationExpiresAt: new Date(now.getTime() + INVITATION_TTL_MS), createdAt: now, updatedAt: now })
+    const result = await (await db()).collection<User>('users').insertOne({ email, role: roleFrom(input.role), status: 'active', createdAt: now, updatedAt: now })
     const user = { _id: result.insertedId, email, role: roleFrom(input.role), status: 'active' as const, createdAt: now, updatedAt: now }
-    const inviteUrl = new URL(config.WEB_ORIGIN)
-    inviteUrl.searchParams.set('invite', activationToken)
-    inviteUrl.searchParams.set('email', email)
-    return reply.code(201).send({ data: { ...userDto(user), passwordInitialized: false, inviteUrl: inviteUrl.toString() } })
+    return reply.code(201).send({ data: { ...userDto(user), passwordInitialized: false } })
   } catch (error) {
     if ((error as { code?: number }).code === 11000) return reply.code(409).send({ error: 'Un compte existe déjà pour cette adresse e-mail.' })
     throw error

@@ -53,12 +53,4 @@ Créez MongoDB, Redis, l’application `api/` (port `4000`, volume `/data/upload
 
 Toutes les routes produit sous `/v1` demandent une session chiffrée dans un cookie HTTP-only (14 jours). Les connexions sont limitées à huit essais par cinq minutes. Les utilisateurs sont enregistrés dans MongoDB ; les mots de passe sont dérivés avec `scrypt` et ne sont jamais stockés en clair.
 
-Pour initialiser le premier administrateur, ajoutez ces variables à l’application API avant le déploiement :
-
-```text
-RELAY_OWNER_EMAIL=admin@exemple.com
-RELAY_OWNER_ACTIVATION_TOKEN=<jeton-aléatoire-d-au-moins-32-caractères>
-AUTH_SECRET=<secret-aléatoire-d-au-moins-32-caractères>
-```
-
-Ouvrez ensuite `https://votre-domaine/?email=admin@exemple.com&invite=<RELAY_OWNER_ACTIVATION_TOKEN>` : l’administrateur choisit son premier mot de passe. Depuis **Paramètres → Accès au back-office**, il peut ajouter les autres adresses et copier leur lien d’invitation individuel. Chaque invitation expire au bout de sept jours et devient inutilisable dès que le mot de passe a été défini.
+Un administrateur ajoute les adresses autorisées depuis **Paramètres → Accès au back-office**. Au premier accès, chaque personne choisit son mot de passe ; il devient celui de ses connexions suivantes.
