@@ -4,7 +4,7 @@ import {
   ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Clock3, FileVideo,
   FolderOpen, Grid2X2, Image, ImagePlus, LayoutDashboard, LoaderCircle,
   MoreHorizontal, Plus, Search, Send, Settings2, Upload, Video, X, AlertCircle,
-  BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart
+  BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart, LogOut, ShieldCheck, Users, Copy
 } from 'lucide-react'
 import './styles.css'
 import './pages.css'
@@ -22,9 +22,9 @@ const platformMeta = {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers: { ...(options.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...options.headers } })
+  const response = await fetch(`${API_URL}${path}`, { credentials: 'include', ...options, headers: { ...(options.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...options.headers } })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload.error || 'Une erreur est survenue.')
+  if (!response.ok) { const error = new Error(payload.error || 'Une erreur est survenue.'); error.code = payload.code; throw error }
   return payload.data
 }
 
@@ -33,6 +33,40 @@ const mediaType = (asset) => asset?.kind === 'video' ? 'Vidéo' : 'Image'
 const statusLabel = { draft: 'Brouillon', scheduled: 'Programmée', dispatching: 'En cours', published: 'Publiée', failed: 'À relancer' }
 
 function App() {
+  const [user, setUser] = useState(undefined)
+  useEffect(() => { request('/v1/auth/session').then((data) => setUser(data.user)).catch(() => setUser(null)) }, [])
+  if (user === undefined) return <div className="auth-loading"><span className="brand-mark">R</span><span>Vérification de votre session…</span></div>
+  if (!user) return <AuthScreen onAuthenticated={setUser} />
+  return <Workspace session={user} onSignedOut={() => setUser(null)} />
+}
+
+function AuthScreen({ onAuthenticated }) {
+  const invitation = useMemo(() => new URLSearchParams(window.location.search), [])
+  const activationToken = invitation.get('invite') || ''
+  const [mode, setMode] = useState(activationToken ? 'activate' : 'login')
+  const [email, setEmail] = useState(invitation.get('email') || '')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const submit = async (event) => {
+    event.preventDefault(); setError('')
+    if (mode === 'activate' && !activationToken) { setError('Utilisez le lien d’invitation transmis par votre administrateur.'); return }
+    if (mode === 'activate' && password !== confirmation) { setError('Les deux mots de passe doivent être identiques.'); return }
+    setSaving(true)
+    try {
+      const data = await request(mode === 'activate' ? '/v1/auth/activate' : '/v1/auth/session', { method: 'POST', body: JSON.stringify(mode === 'activate' ? { email, password, activationToken } : { email, password }) })
+      onAuthenticated(data.user)
+    } catch (cause) {
+      if (cause.code === 'PASSWORD_SETUP_REQUIRED') { setPassword(''); setError('Votre compte attend son activation. Utilisez le lien d’invitation reçu de votre administrateur.') }
+      else if (cause.code === 'ACCOUNT_ACTIVE') { setMode('login'); setPassword(''); setConfirmation(''); setError('Ce compte est déjà activé. Connectez-vous avec votre mot de passe.') }
+      else setError(cause.message)
+    } finally { setSaving(false) }
+  }
+  return <main className="auth-page"><section className="auth-intro"><div className="auth-brand"><span className="brand-mark">R</span><b>relay</b></div><div className="auth-copy"><span className="eyebrow">ESPACE ÉQUIPE</span><h1>Publier avec une équipe alignée.</h1><p>Accédez à vos médias, vos campagnes et vos connexions sociales depuis un espace privé.</p></div><div className="auth-steps"><span><i>01</i>Vos comptes sociaux restent reliés à l’espace Relay.</span><span><i>02</i>Les publications sont programmées à partir de données réelles.</span></div></section><section className="auth-form-wrap"><form className="auth-form" onSubmit={submit}><span className="eyebrow">{mode === 'activate' ? 'ACTIVATION DU COMPTE' : 'CONNEXION SÉCURISÉE'}</span><h2>{mode === 'activate' ? 'Choisissez votre mot de passe.' : 'Bienvenue dans Relay.'}</h2><p>{mode === 'activate' ? 'Votre adresse est autorisée. Ce mot de passe sera celui de vos prochaines connexions.' : 'Utilisez l’adresse e-mail qui vous a été attribuée.'}</p><label>ADRESSE E-MAIL<input autoComplete="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="vous@entreprise.com" required /></label><label>MOT DE PASSE<input autoComplete={mode === 'activate' ? 'new-password' : 'current-password'} type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength="12" placeholder="12 caractères minimum" required /></label>{mode === 'activate' && <label>CONFIRMER LE MOT DE PASSE<input autoComplete="new-password" type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} minLength="12" placeholder="Répétez le mot de passe" required /></label>}{error && <div className="auth-error"><AlertCircle size={16}/>{error}</div>}<button className="auth-submit" disabled={saving}>{saving ? 'Patientez…' : mode === 'activate' ? 'Activer mon compte' : 'Se connecter'} <ArrowUpRight size={16}/></button>{mode === 'activate' && <button type="button" className="auth-back" onClick={() => { setMode('login'); setError(''); setPassword(''); setConfirmation('') }}>J’ai déjà un mot de passe</button>}</form></section></main>
+}
+
+function Workspace({ session, onSignedOut }) {
   const [activeTab, setActiveTab] = useState('overview')
   const [assets, setAssets] = useState([])
   const [publications, setPublications] = useState([])
@@ -80,7 +114,7 @@ function App() {
       </nav>
       <div className="sidebar-label">ESPACE</div>
       <div className="space-line"><span className="space-dot mint"></span> Données réelles</div>
-      <div className="sidebar-bottom"><Nav icon={Settings2} label="Paramètres" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} /><div className="profile"><span className="avatar">R</span><span><b>Relay</b><small>Workspace par défaut</small></span></div></div>
+      <div className="sidebar-bottom"><Nav icon={Settings2} label="Paramètres" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} /><div className="profile"><span className="avatar">R</span><span><b>{session.email}</b><small>{session.role === 'owner' ? 'Administrateur' : 'Membre'}</small></span></div></div>
     </aside>
     <main className="main-content">
       <header className="topbar"><div className="crumb"><span>Relay</span><ChevronRight size={15}/><b>{pageTitle}</b></div><div className="header-actions"><button className="icon-button" onClick={refresh} aria-label="Actualiser"><RefreshCw size={17}/></button><button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={18}/>Créer une publication</button></div></header>
@@ -90,7 +124,7 @@ function App() {
       {!error && !loading && activeTab === 'calendar' && <CalendarPage publications={publications} assets={assetMap} onSelect={setSelected} setComposerOpen={setComposerOpen} />}
       {!error && !loading && activeTab === 'media' && <MediaPage assets={assets} refresh={refresh} flash={flash} setComposerOpen={setComposerOpen} />}
       {!error && !loading && activeTab === 'analytics' && <AnalyticsPage analytics={analytics} />}
-      {!error && !loading && activeTab === 'settings' && <SettingsPage connections={connections} />}
+      {!error && !loading && activeTab === 'settings' && <SettingsPage connections={connections} session={session} onSignedOut={onSignedOut} />}
     </main>
     {activeTab === 'calendar' && selected && <PublicationPanel publication={selected} asset={assetMap.get(selected.assetId)} onClose={() => setSelected(null)} />}
     {composerOpen && <Composer assets={assets} refresh={refresh} onClose={() => setComposerOpen(false)} onCreated={onCreated} />}
@@ -125,10 +159,19 @@ function MediaPage({ assets, refresh, flash, setComposerOpen }) {
 function AnalyticsPage({ analytics }) { return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">PERFORMANCES</span><h1>Les résultats vérifiés.</h1><p>Les statistiques détaillées seront disponibles lorsque les plateformes renverront leurs insights.</p></div></div><div className="metric-grid analytics-metrics"><Metric icon={Send} value={analytics?.published || 0} label="livraisons confirmées"/><Metric icon={Eye} value="—" label="portée synchronisée"/><Metric icon={Heart} value="—" label="interactions synchronisées"/></div><div className="surface analytics-empty"><BarMessage/><h2>{analytics?.metricsAvailable ? 'Données synchronisées' : 'Insights non disponibles'}</h2><p>Relay affiche ici uniquement les métriques retournées par les API des plateformes. Connectez les applications OAuth dans n8n puis activez leurs nœuds de récupération d’insights.</p>{analytics?.byPlatform?.length ? <div className="delivery-summary">{analytics.byPlatform.map((item) => <span key={item.platform}>{platformMeta[item.platform]?.label} · {item.published} livraison{item.published > 1 ? 's' : ''}</span>)}</div> : null}</div></section> }
 function BarMessage() { return <span className="metric-icon"><Grid2X2 size={18}/></span> }
 
-function SettingsPage({ connections }) {
+function SettingsPage({ connections, session, onSignedOut }) {
   const openN8n = () => window.open(N8N_URL, '_blank', 'noopener,noreferrer')
   const connectInstagram = () => { window.location.assign(`${API_URL}/v1/auth/instagram?workspaceId=${encodeURIComponent(WORKSPACE_ID)}`) }
-  return <section className="content-area product-page settings-page"><div className="page-title-row"><div><span className="eyebrow">CONNEXIONS</span><h1>Vos canaux de diffusion.</h1><p>Un compte n’est indiqué comme connecté qu’après une autorisation OAuth valide.</p></div></div><div className="connection-callout"><span className="metric-icon"><Camera size={17}/></span><div><b>Connectez Instagram depuis Relay</b><p>Vous vous authentifiez directement auprès d’Instagram. Relay chiffre le jeton de connexion ; n8n sert ensuite à exécuter les publications planifiées.</p></div><button className="secondary-button" onClick={connectInstagram}>Connecter Instagram <ArrowUpRight size={14}/></button></div><div className="surface settings-card"><div className="section-title"><div><span className="eyebrow">RÉSEAUX SOCIAUX</span><h2>État des connexions.</h2></div></div>{connections.map((connection) => { const meta = platformMeta[connection.platform]; const Icon = meta.icon; const isInstagram = connection.platform === 'instagram'; const action = isInstagram ? connectInstagram : openN8n; return <div className="connection-row" key={connection.platform}><span className="network-logo" style={{ color: meta.color, background: meta.bg }}><Icon size={18}/></span><div><b>{meta.label}</b><small>{connection.connected ? connection.accountName || 'Compte autorisé' : 'Aucune autorisation OAuth enregistrée'}</small></div><span className={connection.connected ? 'connected-label' : 'pending-label'}>{connection.connected ? 'Connecté' : 'À configurer'}</span><button className="connection-action" onClick={action}>{connection.connected ? (isInstagram ? 'Reconnecter' : 'Gérer') : (isInstagram ? 'Se connecter' : 'Configurer OAuth')} {isInstagram ? <ArrowUpRight size={13}/> : <ExternalLink size={13}/>}</button></div>})}</div><div className="surface settings-card"><span className="eyebrow">AUTOMATISATION</span><h2>n8n</h2><p className="quiet-copy">La file de publication transmet les médias programmés au webhook n8n. Instagram est autorisé dans Relay, puis son jeton est fourni au workflow uniquement lors de l’exécution.</p><button className="text-button settings-n8n-link" onClick={openN8n}>Ouvrir n8n <ArrowUpRight size={14}/></button></div></section>
+  return <section className="content-area product-page settings-page"><div className="page-title-row"><div><span className="eyebrow">CONNEXIONS</span><h1>Vos canaux de diffusion.</h1><p>Un compte n’est indiqué comme connecté qu’après une autorisation OAuth valide.</p></div></div><div className="surface account-card"><span className="metric-icon"><ShieldCheck size={17}/></span><div><b>{session.email}</b><p>Accès {session.role === 'owner' ? 'administrateur' : 'membre'} à l’espace Relay.</p></div><button className="secondary-button" onClick={async () => { await request('/v1/auth/session', { method: 'DELETE' }); onSignedOut() }}><LogOut size={14}/>Se déconnecter</button></div>{session.role === 'owner' && <TeamPanel />}<div className="connection-callout"><span className="metric-icon"><Camera size={17}/></span><div><b>Connectez Instagram depuis Relay</b><p>Vous vous authentifiez directement auprès d’Instagram. Relay chiffre le jeton de connexion ; n8n sert ensuite à exécuter les publications planifiées.</p></div><button className="secondary-button" onClick={connectInstagram}>Connecter Instagram <ArrowUpRight size={14}/></button></div><div className="surface settings-card"><div className="section-title"><div><span className="eyebrow">RÉSEAUX SOCIAUX</span><h2>État des connexions.</h2></div></div>{connections.map((connection) => { const meta = platformMeta[connection.platform]; const Icon = meta.icon; const isInstagram = connection.platform === 'instagram'; const action = isInstagram ? connectInstagram : openN8n; return <div className="connection-row" key={connection.platform}><span className="network-logo" style={{ color: meta.color, background: meta.bg }}><Icon size={18}/></span><div><b>{meta.label}</b><small>{connection.connected ? connection.accountName || 'Compte autorisé' : 'Aucune autorisation OAuth enregistrée'}</small></div><span className={connection.connected ? 'connected-label' : 'pending-label'}>{connection.connected ? 'Connecté' : 'À configurer'}</span><button className="connection-action" onClick={action}>{connection.connected ? (isInstagram ? 'Reconnecter' : 'Gérer') : (isInstagram ? 'Se connecter' : 'Configurer OAuth')} {isInstagram ? <ArrowUpRight size={13}/> : <ExternalLink size={13}/>}</button></div>})}</div><div className="surface settings-card"><span className="eyebrow">AUTOMATISATION</span><h2>n8n</h2><p className="quiet-copy">La file de publication transmet les médias programmés au webhook n8n. Instagram est autorisé dans Relay, puis son jeton est fourni au workflow uniquement lors de l’exécution.</p><button className="text-button settings-n8n-link" onClick={openN8n}>Ouvrir n8n <ArrowUpRight size={14}/></button></div></section>
+}
+
+
+function TeamPanel() {
+  const [members, setMembers] = useState([]); const [email, setEmail] = useState(''); const [error, setError] = useState(''); const [saving, setSaving] = useState(false); const [inviteUrl, setInviteUrl] = useState('')
+  const load = async () => { try { setMembers(await request('/v1/team')) } catch (cause) { setError(cause.message) } }
+  useEffect(() => { load() }, [])
+  const invite = async (event) => { event.preventDefault(); setError(''); setInviteUrl(''); setSaving(true); try { const member = await request('/v1/team', { method: 'POST', body: JSON.stringify({ email, role: 'member' }) }); setInviteUrl(member.inviteUrl); setEmail(''); await load() } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
+  return <section className="surface team-card"><div className="section-title"><div><span className="eyebrow">ÉQUIPE</span><h2>Accès au back-office.</h2></div><Users size={18}/></div><p className="quiet-copy">Ajoutez une adresse, puis transmettez-lui son invitation personnelle. La personne choisira son premier mot de passe depuis ce lien.</p><form className="team-add" onSubmit={invite}><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="membre@entreprise.com" required /><button className="secondary-button" disabled={saving}><Plus size={14}/>{saving ? 'Ajout…' : 'Ajouter'}</button></form>{inviteUrl && <div className="invite-created"><span>Invitation prête — valable 7 jours.</span><button type="button" onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy size={13}/>Copier le lien</button></div>}{error && <p className="team-error">{error}</p>}<div className="team-list">{members.map((member) => <div className="team-member" key={member.id}><span className="team-avatar">{member.email.slice(0, 1).toUpperCase()}</span><span><b>{member.email}</b><small>{member.role === 'owner' ? 'Administrateur' : 'Membre'} · {member.passwordInitialized ? 'Compte activé' : 'Invitation à transmettre'}</small></span><span className={member.passwordInitialized ? 'connected-label' : 'pending-label'}>{member.passwordInitialized ? 'Actif' : 'En attente'}</span></div>)}</div></section>
 }
 
 function Composer({ assets, refresh, onClose, onCreated }) {

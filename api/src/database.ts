@@ -17,6 +17,9 @@ export async function db() {
     await database.collection('oauthStates').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
     await database.collection('socialConnections').createIndex({ workspaceId: 1, platform: 1 }, { unique: true })
     await database.collection('deliveryEvents').createIndex({ publicationId: 1, createdAt: -1 })
+    await database.collection('users').createIndex({ email: 1 }, { unique: true })
+    await database.collection('sessions').createIndex({ tokenHash: 1 }, { unique: true })
+    await database.collection('sessions').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
   }
   return database
 }

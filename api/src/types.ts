@@ -40,3 +40,18 @@ export interface Connection {
   connectedAt?: Date
   updatedAt: Date
 }
+
+export type UserRole = 'owner' | 'member'
+
+export interface User {
+  _id?: ObjectId
+  email: string
+  passwordHash?: string
+  role: UserRole
+  status: 'active'
+  createdAt: Date
+  updatedAt: Date
+  passwordSetAt?: Date
+  activationTokenHash?: string
+  activationExpiresAt?: Date
+}

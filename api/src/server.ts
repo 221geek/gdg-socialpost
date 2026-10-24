@@ -4,6 +4,7 @@ import { basename, extname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import cors from '@fastify/cors'
+import rateLimit from '@fastify/rate-limit'
 import multipart from '@fastify/multipart'
 import fastifyStatic from '@fastify/static'
 import Fastify from 'fastify'
@@ -11,15 +12,38 @@ import { ObjectId } from 'mongodb'
 import { z } from 'zod'
 import { config } from './config.js'
 import { decryptConnectionToken, encryptConnectionToken } from './connection-crypto.js'
+import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, invitationHash, INVITATION_TTL_MS, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
 import { closeDatabase, db } from './database.js'
 import { queuePublication } from './queue.js'
-import { Asset, Connection, platforms, Publication } from './types.js'
+import { Asset, Connection, platforms, Publication, User } from './types.js'
 
 const app = Fastify({ logger: true })
 await mkdir(config.UPLOAD_DIR, { recursive: true })
-await app.register(cors, { origin: config.WEB_ORIGIN })
+await app.register(cors, { origin: config.WEB_ORIGIN, credentials: true })
+await app.register(rateLimit, { global: false })
 await app.register(multipart, { limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 1 } })
 await app.register(fastifyStatic, { root: config.UPLOAD_DIR, prefix: '/media/' })
+
+await ensureBootstrapOwner()
+
+declare module 'fastify' {
+  interface FastifyRequest { authUser?: SessionUser }
+}
+
+const publicPath = (path: string) => path === '/health' || path.startsWith('/media/') || path.startsWith('/v1/internal/') || path === '/v1/auth/session' || path === '/v1/auth/activate' || path === '/v1/auth/instagram/callback'
+
+app.addHook('onRequest', async (request, reply) => {
+  if (publicPath(request.url.split('?')[0])) return
+  const user = await authenticatedUser(request)
+  if (!user) return reply.code(401).send({ error: 'Votre session a expiré. Connectez-vous pour continuer.', code: 'UNAUTHENTICATED' })
+  request.authUser = user
+})
+
+const requireOwner = (request: Fastify.FastifyRequest, reply: Fastify.FastifyReply) => {
+  if (isOwner(request.authUser)) return true
+  reply.code(403).send({ error: 'Cette action est réservée aux administrateurs.' })
+  return false
+}
 
 const workspaceId = z.string().min(1)
 const objectId = z.string().regex(/^[0-9a-f]{24}$/i, 'Identifiant invalide')
@@ -53,6 +77,77 @@ const publicationDto = (publication: Publication) => ({
 app.get('/health', async () => {
   await (await db()).command({ ping: 1 })
   return { ok: true, service: 'relay-api' }
+})
+
+const authCredentials = z.object({ email: z.string().email(), password: z.string().min(12).max(256) })
+const activationCredentials = authCredentials.extend({ activationToken: z.string().min(32).max(256) })
+
+app.post('/v1/auth/session', { config: { rateLimit: { max: 8, timeWindow: '5 minutes' } } }, async (request, reply) => {
+  const input = authCredentials.parse(request.body)
+  const user = await (await db()).collection<User>('users').findOne({ email: normalizeEmail(input.email), status: 'active' })
+  if (!user) return reply.code(401).send({ error: 'Adresse e-mail ou mot de passe incorrect.', code: 'INVALID_CREDENTIALS' })
+  if (!user.passwordHash) return reply.code(409).send({ error: 'Choisissez d’abord votre mot de passe pour activer votre compte.', code: 'PASSWORD_SETUP_REQUIRED' })
+  if (!await passwordMatches(input.password, user.passwordHash)) return reply.code(401).send({ error: 'Adresse e-mail ou mot de passe incorrect.', code: 'INVALID_CREDENTIALS' })
+  const token = await createSession(user)
+  setSessionCookie(reply, token)
+  return { data: { user: userDto(user) } }
+})
+
+app.post('/v1/auth/activate', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (request, reply) => {
+  const input = activationCredentials.parse(request.body)
+  const database = await db()
+  const email = normalizeEmail(input.email)
+  const existing = await database.collection<User>('users').findOne({ email, status: 'active' })
+  if (!existing) return reply.code(404).send({ error: 'Cette adresse e-mail n’est pas autorisée sur Relay.', code: 'ACCOUNT_NOT_FOUND' })
+  if (existing.passwordHash) return reply.code(409).send({ error: 'Ce compte est déjà activé. Connectez-vous avec votre mot de passe.', code: 'ACCOUNT_ACTIVE' })
+  if (!existing.activationTokenHash || !existing.activationExpiresAt || existing.activationExpiresAt <= new Date() || existing.activationTokenHash !== invitationHash(input.activationToken)) return reply.code(401).send({ error: 'Cette invitation est invalide ou a expiré.', code: 'INVALID_INVITATION' })
+  const now = new Date()
+  const update = await database.collection<User>('users').findOneAndUpdate(
+    { _id: existing._id, passwordHash: { $exists: false }, activationTokenHash: invitationHash(input.activationToken) },
+    { $set: { passwordHash: await hashPassword(input.password), passwordSetAt: now, updatedAt: now }, $unset: { activationTokenHash: '', activationExpiresAt: '' } },
+    { returnDocument: 'after' },
+  )
+  if (!update) return reply.code(409).send({ error: 'Ce compte vient d’être activé. Connectez-vous avec votre mot de passe.', code: 'ACCOUNT_ACTIVE' })
+  const token = await createSession(update)
+  setSessionCookie(reply, token)
+  return reply.code(201).send({ data: { user: userDto(update) } })
+})
+
+app.get('/v1/auth/session', async (request, reply) => {
+  const user = await authenticatedUser(request)
+  if (!user) return reply.code(401).send({ error: 'Aucune session active.', code: 'UNAUTHENTICATED' })
+  return { data: { user: userDto(user) } }
+})
+
+app.delete('/v1/auth/session', async (request, reply) => {
+  await revokeSession(request)
+  clearSessionCookie(reply)
+  return reply.code(204).send()
+})
+
+app.get('/v1/team', async (request, reply) => {
+  if (!requireOwner(request, reply)) return
+  const users = await (await db()).collection<User>('users').find({ status: 'active' }).sort({ createdAt: 1 }).toArray()
+  return { data: users.map((user) => ({ ...userDto(user), passwordInitialized: Boolean(user.passwordHash), passwordSetAt: user.passwordSetAt?.toISOString() })) }
+})
+
+app.post('/v1/team', async (request, reply) => {
+  if (!requireOwner(request, reply)) return
+  const input = z.object({ email: z.string().email(), role: z.enum(['owner', 'member']).default('member') }).parse(request.body)
+  const email = normalizeEmail(input.email)
+  const now = new Date()
+  try {
+    const activationToken = randomBytes(32).toString('base64url')
+    const result = await (await db()).collection<User>('users').insertOne({ email, role: roleFrom(input.role), status: 'active', activationTokenHash: invitationHash(activationToken), activationExpiresAt: new Date(now.getTime() + INVITATION_TTL_MS), createdAt: now, updatedAt: now })
+    const user = { _id: result.insertedId, email, role: roleFrom(input.role), status: 'active' as const, createdAt: now, updatedAt: now }
+    const inviteUrl = new URL(config.WEB_ORIGIN)
+    inviteUrl.searchParams.set('invite', activationToken)
+    inviteUrl.searchParams.set('email', email)
+    return reply.code(201).send({ data: { ...userDto(user), passwordInitialized: false, inviteUrl: inviteUrl.toString() } })
+  } catch (error) {
+    if ((error as { code?: number }).code === 11000) return reply.code(409).send({ error: 'Un compte existe déjà pour cette adresse e-mail.' })
+    throw error
+  }
 })
 
 app.get('/v1/assets', async (request) => {
