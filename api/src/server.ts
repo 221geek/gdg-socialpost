@@ -246,6 +246,27 @@ app.post('/v1/publications/:id/schedule', async (request, reply) => {
   return { data: publicationDto(publication) }
 })
 
+app.patch('/v1/publications/:id', async (request, reply) => {
+  const { id } = z.object({ id: objectId }).parse(request.params)
+  const input = z.object({
+    workspaceId,
+    title: z.string().trim().min(1).max(120),
+    caption: z.string().max(2200).default(''),
+    destinations: z.array(z.enum(platforms)).min(1),
+    scheduledAt: z.coerce.date(),
+  }).parse(request.body)
+  if (input.scheduledAt.getTime() < Date.now() - 60_000) return reply.code(422).send({ error: 'La date de planification doit être dans le futur.' })
+  const database = await db()
+  const publication = await database.collection<Publication>('publications').findOneAndUpdate(
+    { _id: new ObjectId(id), workspaceId: input.workspaceId, status: { $in: ['draft', 'scheduled', 'failed'] } },
+    { $set: { title: input.title, caption: input.caption, destinations: input.destinations, scheduledAt: input.scheduledAt, status: 'scheduled', updatedAt: new Date() } },
+    { returnDocument: 'after' },
+  )
+  if (!publication) return reply.code(404).send({ error: 'Publication introuvable ou déjà en cours de diffusion.' })
+  await queuePublication(id, input.scheduledAt)
+  return { data: publicationDto(publication) }
+})
+
 app.get('/v1/connections', async (request) => {
   const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
   const saved = await (await db()).collection<Connection>('connections').find({ workspaceId: id }).toArray()
