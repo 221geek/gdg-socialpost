@@ -55,7 +55,7 @@ function AuthScreen({ onAuthenticated }) {
       const data = await request(mode === 'activate' ? '/v1/auth/activate' : '/v1/auth/session', { method: 'POST', body: JSON.stringify({ email, password }) })
       onAuthenticated(data.user)
     } catch (cause) {
-      if (cause.code === 'PASSWORD_SETUP_REQUIRED') { setMode('activate'); setPassword(''); setConfirmation(''); setError('Votre compte est prêt. Choisissez maintenant votre mot de passe.') }
+      if (cause.code === 'PASSWORD_SETUP_REQUIRED') { setMode('activate'); setConfirmation(''); setError('Votre compte est prêt. Confirmez votre mot de passe pour l’activer.') }
       else if (cause.code === 'ACCOUNT_ACTIVE') { setMode('login'); setPassword(''); setConfirmation(''); setError('Ce compte est déjà activé. Connectez-vous avec votre mot de passe.') }
       else setError(cause.message)
     } finally { setSaving(false) }
