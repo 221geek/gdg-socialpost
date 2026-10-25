@@ -79,7 +79,7 @@ app.get('/health', async () => {
   return { ok: true, service: 'relay-api' }
 })
 
-const authCredentials = z.object({ email: z.string().email(), password: z.string().min(12).max(256) })
+const authCredentials = z.object({ email: z.string().email(), password: z.string().min(8).max(256) })
 
 app.post('/v1/auth/session', { config: { rateLimit: { max: 8, timeWindow: '5 minutes' } } }, async (request, reply) => {
   const input = authCredentials.parse(request.body)
