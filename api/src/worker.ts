@@ -2,7 +2,7 @@ import { Job, UnrecoverableError, Worker } from 'bullmq'
 import { Db, ObjectId } from 'mongodb'
 import { config } from './config.js'
 import { closeDatabase, db } from './database.js'
-import { logEvent, setDelivery, settlePublication } from './deliveries.js'
+import { HEARTBEAT_ID, logEvent, setDelivery, settlePublication, WORKER_PROTOCOL } from './deliveries.js'
 import { Asset, Platform, Publication } from './types.js'
 import { PublishError, publishToX } from './x-publisher.js'
 
@@ -106,6 +106,21 @@ worker.on('failed', async (job, error) => {
 worker.on('ready', () => console.log(JSON.stringify({ scope: 'worker', message: 'Worker prêt', concurrency: 12 })))
 worker.on('error', (error) => console.error(JSON.stringify({ scope: 'worker', message: error.message })))
 
-async function shutdown() { await worker.close(); await closeDatabase(); process.exit(0) }
+const startedAt = new Date()
+async function heartbeat() {
+  try {
+    await (await db()).collection<{ _id: string }>('serviceHeartbeats').updateOne(
+      { _id: HEARTBEAT_ID },
+      { $set: { protocol: WORKER_PROTOCOL, startedAt, lastSeenAt: new Date(), hostname: process.env.HOSTNAME } },
+      { upsert: true },
+    )
+  } catch (error) {
+    console.error(JSON.stringify({ scope: 'worker', message: `Heartbeat impossible : ${(error as Error).message}` }))
+  }
+}
+heartbeat()
+const heartbeatTimer = setInterval(heartbeat, 30_000)
+
+async function shutdown() { clearInterval(heartbeatTimer); await worker.close(); await closeDatabase(); process.exit(0) }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)

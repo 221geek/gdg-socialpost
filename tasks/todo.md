@@ -41,3 +41,11 @@
 - [x] API : erreurs de validation → 422 lisible (au lieu d'un 500 brut)
 - [x] UI : fenêtre à 3 colonnes (vidéo · contenu + journal · actions + discussion), Reprogrammer, Supprimer
 - [x] Testé en local : 2 comptes qui commentent, reprogrammation d'une publication bloquée, suppression (job Redis retiré)
+
+## [2026-10-25] « Call For Speaker » bloquée En cours, pas de bouton Supprimer
+- Diagnostic : la relance (13:33:52) a été journalisée par la nouvelle API, puis la publication est passée `dispatching`
+  sans l'événement « Diffusion démarrée » que le nouveau worker écrit immédiatement → prise par un **worker en ancienne version**.
+- [x] Heartbeat du worker (`serviceHeartbeats`, protocole 2) exposé dans `GET /health` + bandeau d'alerte dans le back-office
+- [x] Supprimer toujours disponible (avertissement si diffusion en cours)
+- [x] Relance/reprogrammation après 10 min sans activité du journal (`lastActivityAt`), heure affichée
+- [ ] Prod : redéployer le service worker depuis la dernière version, puis vérifier `/health` → `worker.online && worker.upToDate`

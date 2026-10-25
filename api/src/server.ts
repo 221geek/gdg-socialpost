@@ -14,7 +14,7 @@ import { config } from './config.js'
 import { decryptConnectionToken, encryptConnectionToken } from './connection-crypto.js'
 import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
 import { closeDatabase, db } from './database.js'
-import { logEvent, setDelivery, settlePublication } from './deliveries.js'
+import { HEARTBEAT_ID, logEvent, setDelivery, settlePublication, WORKER_PROTOCOL } from './deliveries.js'
 import { queuePublication, removePendingJobs } from './queue.js'
 import { Asset, AssetComment, Connection, DeliveryEvent, platforms, Publication, PublicationComment, User } from './types.js'
 import { X_SCOPES } from './x-publisher.js'
@@ -89,7 +89,7 @@ const publicationDto = (publication: Publication) => ({
 })
 
 const utc = (date: Date) => `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`
-const STALE_DISPATCH_MS = 20 * 60 * 1000
+const STALE_DISPATCH_MS = 10 * 60 * 1000
 
 // Before a new dispatch run, forget failed or pending deliveries but keep the ones already published,
 // so a relaunch never posts twice on the same network.
@@ -106,9 +106,16 @@ async function isStaleDispatch(publication: Publication) {
   return Date.now() - lastActivity > STALE_DISPATCH_MS
 }
 
+async function workerStatus() {
+  const heartbeat = await (await db()).collection<{ _id: string, protocol?: number, lastSeenAt?: Date, startedAt?: Date }>('serviceHeartbeats').findOne({ _id: HEARTBEAT_ID })
+  const online = Boolean(heartbeat?.lastSeenAt && Date.now() - heartbeat.lastSeenAt.getTime() < 90_000)
+  const upToDate = heartbeat?.protocol === WORKER_PROTOCOL
+  return { online, upToDate, protocol: heartbeat?.protocol ?? null, expectedProtocol: WORKER_PROTOCOL, lastSeenAt: heartbeat?.lastSeenAt?.toISOString() ?? null, startedAt: heartbeat?.startedAt?.toISOString() ?? null }
+}
+
 app.get('/health', async () => {
   await (await db()).command({ ping: 1 })
-  return { ok: true, service: 'relay-api' }
+  return { ok: true, service: 'relay-api', worker: await workerStatus() }
 })
 
 const authCredentials = z.object({ email: z.string().email(), password: z.string().min(8).max(256) })
@@ -253,7 +260,14 @@ app.get('/v1/publications', async (request) => {
     database.collection<PublicationComment>('publicationComments').aggregate<{ _id: ObjectId, count: number }>([{ $match: { workspaceId: id } }, { $group: { _id: '$publicationId', count: { $sum: 1 } } }]).toArray(),
   ])
   const commentCount = new Map(counts.map((item) => [item._id.toHexString(), item.count]))
-  return { data: data.map((publication) => ({ ...publicationDto(publication), commentCount: commentCount.get(publication._id!.toHexString()) ?? 0 })) }
+  const dispatchingIds = data.filter((publication) => publication.status === 'dispatching').map((publication) => publication._id!.toHexString())
+  const lastEvents = dispatchingIds.length ? await database.collection<DeliveryEvent>('deliveryEvents').aggregate<{ _id: string, at: Date }>([{ $match: { publicationId: { $in: dispatchingIds } } }, { $group: { _id: '$publicationId', at: { $max: '$createdAt' } } }]).toArray() : []
+  const lastEvent = new Map(lastEvents.map((item) => [item._id, item.at.getTime()]))
+  return { data: data.map((publication) => {
+    const id = publication._id!.toHexString()
+    const lastActivityAt = new Date(Math.max(publication.updatedAt.getTime(), lastEvent.get(id) ?? 0)).toISOString()
+    return { ...publicationDto(publication), commentCount: commentCount.get(id) ?? 0, lastActivityAt }
+  }) }
 })
 
 app.post('/v1/publications', async (request, reply) => {
@@ -291,7 +305,7 @@ app.post('/v1/publications/:id/publish-now', async (request, reply) => {
   const current = await publications.findOne({ _id: new ObjectId(id), workspaceId: workspace })
   if (!current) return reply.code(404).send({ error: 'Publication introuvable.' })
   if (current.status === 'published') return reply.code(409).send({ error: 'Cette publication est déjà diffusée.' })
-  if (current.status === 'dispatching' && !await isStaleDispatch(current)) return reply.code(409).send({ error: 'La diffusion est en cours. Consultez le journal ; la relance sera possible si elle reste bloquée plus de 20 minutes.' })
+  if (current.status === 'dispatching' && !await isStaleDispatch(current)) return reply.code(409).send({ error: 'La diffusion est en cours. Consultez le journal ; la relance sera possible si elle reste sans activité plus de 10 minutes.' })
   const now = new Date()
   const publication = await publications.findOneAndUpdate(
     { _id: current._id, status: current.status },
@@ -311,7 +325,7 @@ app.delete('/v1/publications/:id', async (request, reply) => {
   const database = await db()
   const current = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(id), workspaceId: workspace })
   if (!current) return reply.code(404).send({ error: 'Publication introuvable.' })
-  if (current.status === 'dispatching' && !await isStaleDispatch(current)) return reply.code(409).send({ error: 'La diffusion est en cours : attendez la fin avant de supprimer cette publication.' })
+  if (current.status === 'dispatching') request.log.warn({ publicationId: id }, 'Deleting a publication while it is dispatching')
   await removePendingJobs(id)
   const removed = await database.collection<Publication>('publications').deleteOne({ _id: current._id, status: current.status })
   if (!removed.deletedCount) return reply.code(409).send({ error: 'La publication vient de changer d’état. Actualisez la page.' })

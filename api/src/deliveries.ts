@@ -1,6 +1,10 @@
 import { Db, ObjectId } from 'mongodb'
 import { Delivery, DeliveryEvent, Platform, Publication } from './types.js'
 
+// Bumped whenever the worker's dispatch protocol changes, so the API can spot an outdated worker still consuming jobs.
+export const WORKER_PROTOCOL = 2
+export const HEARTBEAT_ID = 'publication-worker'
+
 type EventInput = Omit<DeliveryEvent, '_id' | 'publicationId' | 'createdAt'>
 
 // Every step is written both to MongoDB (visible in the back office) and to stdout (Coolify logs).

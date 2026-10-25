@@ -507,3 +507,15 @@
     border-top: 1px solid var(--line);
   }
 }
+
+.api-error.worker-warning {
+  max-width: 1174px;
+  margin: 20px auto 0;
+}
+
+.action-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #9a6726;
+}

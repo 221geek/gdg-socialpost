@@ -81,6 +81,7 @@ function Workspace({ session, onSignedOut }) {
   const [dashboard, setDashboard] = useState(null)
   const [connections, setConnections] = useState([])
   const [analytics, setAnalytics] = useState(null)
+  const [worker, setWorker] = useState(null)
   const [selection, setSelection] = useState(null)
   const openPublication = (id, mode = 'view') => setSelection({ id, mode })
   const [discussionAsset, setDiscussionAsset] = useState(null)
@@ -98,6 +99,7 @@ function Workspace({ session, onSignedOut }) {
         request(`/v1/dashboard?workspaceId=${WORKSPACE_ID}`), request(`/v1/connections?workspaceId=${WORKSPACE_ID}`), request(`/v1/analytics?workspaceId=${WORKSPACE_ID}`),
       ])
       setAssets(nextAssets); setPublications(nextPublications); setDashboard(nextDashboard); setConnections(nextConnections); setAnalytics(nextAnalytics)
+      fetch(`${API_URL}/health`).then((response) => response.json()).then((health) => setWorker(health.worker || null)).catch(() => setWorker(null))
     } catch (cause) { setError(cause.message || 'Impossible de joindre l’API Relay.') } finally { setLoading(false) }
   }
   useEffect(() => {
@@ -142,6 +144,7 @@ function Workspace({ session, onSignedOut }) {
     <main className="main-content">
       <header className="topbar"><div className="crumb"><span>Relay</span><ChevronRight size={15}/><b>{pageTitle}</b></div><div className="header-actions"><button className="icon-button" onClick={refresh} aria-label="Actualiser"><RefreshCw size={17}/></button><button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={18}/>Créer une publication</button></div></header>
       {error && <ApiError message={error} onRetry={refresh} />}
+      {!error && worker && (!worker.online || !worker.upToDate) && <WorkerWarning worker={worker} />}
       {!error && loading && <LoadingState />}
       {!error && !loading && activeTab === 'overview' && <OverviewPage dashboard={dashboard} publications={publications} assets={assetMap} connections={connections} setActiveTab={setActiveTab} setComposerOpen={setComposerOpen} onOpen={openPublication} />}
       {!error && !loading && activeTab === 'calendar' && <PublicationsPage publications={publications} assets={assetMap} onOpen={openPublication} onChanged={replacePublication} flash={flash} setComposerOpen={setComposerOpen} />}
@@ -154,6 +157,15 @@ function Workspace({ session, onSignedOut }) {
     {discussionAsset && <AssetDiscussion asset={discussionAsset} session={session} onClose={() => setDiscussionAsset(null)} />}
     {notice && <div className="toast"><Check size={16}/>{notice}</div>}
   </div>
+}
+
+function WorkerWarning({ worker }) {
+  const copy = !worker.lastSeenAt
+    ? 'Aucun worker à jour n’a signalé sa présence. Un ancien worker peut encore prendre les publications et les laisser « En cours » sans rien publier : redéployez le service worker (commande node dist/worker.js) depuis la dernière version.'
+    : !worker.upToDate
+      ? `Le worker en service utilise le protocole ${worker.protocol}, la version attendue est ${worker.expectedProtocol}. Redéployez le service worker.`
+      : `Le worker ne répond plus depuis le ${formatDate(worker.lastSeenAt)}. Les publications programmées ne partiront pas tant qu’il ne tourne pas.`
+  return <section className="api-error worker-warning"><AlertCircle size={20}/><div><b>Le service de publication n’est pas opérationnel.</b><p>{copy}</p></div></section>
 }
 
 function Nav({ icon: Icon, label, active, onClick }) { return <button className={active ? 'nav-item active' : 'nav-item'} onClick={onClick}><Icon size={18}/>{label}</button> }
@@ -174,7 +186,10 @@ function OverviewPage({ dashboard, publications, assets, connections, setActiveT
 const publicationFilters = [['all', 'Toutes'], ['scheduled', 'Programmées'], ['dispatching', 'En cours'], ['published', 'Publiées'], ['failed', 'Échecs'], ['draft', 'Brouillons']]
 const canPublishNow = (publication) => ['draft', 'scheduled', 'failed'].includes(publication.status)
 const canEdit = (publication) => ['draft', 'scheduled', 'failed'].includes(publication.status) || isStuck(publication)
-const isStuck = (publication) => publication.status === 'dispatching' && Date.now() - new Date(publication.updatedAt).getTime() > 20 * 60 * 1000
+const STALE_MS = 10 * 60 * 1000
+const lastActivity = (publication) => new Date(publication.lastActivityAt || publication.updatedAt).getTime()
+const isStuck = (publication) => publication.status === 'dispatching' && Date.now() - lastActivity(publication) > STALE_MS
+const relaunchAt = (publication) => new Intl.DateTimeFormat('fr-FR', { timeStyle: 'short' }).format(new Date(lastActivity(publication) + STALE_MS))
 
 async function publishNow(publication, onChanged, flash) {
   const label = publication.status === 'failed' || publication.status === 'dispatching' ? 'Relancer la diffusion maintenant ?' : 'Publier maintenant, sans attendre la date programmée ?'
@@ -199,7 +214,7 @@ function PublicationsPage({ publications, assets, onOpen, onChanged, flash, setC
 }
 
 async function deletePublication(publication, onDeleted, flash) {
-  const warning = publication.status === 'published' ? 'Supprimer cette publication de Relay ? Le post déjà publié sur les réseaux ne sera pas supprimé.' : 'Supprimer définitivement cette publication ? Sa programmation, son journal et sa discussion seront effacés.'
+  const warning = publication.status === 'dispatching' ? 'Cette publication est en cours de diffusion. La supprimer arrête son suivi dans Relay, mais un envoi déjà commencé peut tout de même aboutir sur les réseaux. Supprimer ?' : publication.status === 'published' ? 'Supprimer cette publication de Relay ? Le post déjà publié sur les réseaux ne sera pas supprimé.' : 'Supprimer définitivement cette publication ? Sa programmation, son journal et sa discussion seront effacés.'
   if (!window.confirm(warning)) return
   try { await request(`/v1/publications/${publication._id}?workspaceId=${WORKSPACE_ID}`, { method: 'DELETE' }); onDeleted(publication._id); flash('Publication supprimée.') } catch (cause) { flash(cause.message) }
 }
@@ -234,7 +249,8 @@ function PublicationStudio({ publication, asset, session, initialMode, onClose, 
       <div className="studio-actions">
         {(canPublishNow(publication) || isStuck(publication)) && <button className="primary-button" onClick={() => publishNow(publication, onChanged, flash)}>{publication.status === 'draft' || publication.status === 'scheduled' ? <><Rocket size={14}/>Publier maintenant</> : <><RotateCcw size={14}/>Relancer</>}</button>}
         {canEdit(publication) && !editing && <button className="secondary-button" onClick={() => setEditing(true)}><CalendarClock size={14}/>Reprogrammer / modifier</button>}
-        {(publication.status !== 'dispatching' || isStuck(publication)) && <button className="danger-button" onClick={() => deletePublication(publication, onDeleted, flash)}><Trash2 size={14}/>Supprimer</button>}
+        {publication.status === 'dispatching' && !isStuck(publication) && <p className="action-hint">Diffusion en cours. Sans nouvelle activité dans le journal, la relance et la reprogrammation seront possibles à {relaunchAt(publication)}.</p>}
+        <button className="danger-button" onClick={() => deletePublication(publication, onDeleted, flash)}><Trash2 size={14}/>Supprimer</button>
       </div>
       <div className="studio-thread"><span className="eyebrow">DISCUSSION D’ÉQUIPE</span><CommentThread path={`/v1/publications/${publication._id}/comments`} session={session} onPosted={() => onCommented(publication._id)} /></div>
     </aside>
