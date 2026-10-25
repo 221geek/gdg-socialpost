@@ -15,7 +15,7 @@ import { decryptConnectionToken, encryptConnectionToken } from './connection-cry
 import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
 import { closeDatabase, db } from './database.js'
 import { queuePublication } from './queue.js'
-import { Asset, Connection, platforms, Publication, User } from './types.js'
+import { Asset, AssetComment, Connection, platforms, Publication, User } from './types.js'
 
 const app = Fastify({ logger: true })
 await mkdir(config.UPLOAD_DIR, { recursive: true })
@@ -65,6 +65,7 @@ const oauthState = z.object({
 
 const asId = (id: ObjectId | undefined) => id?.toHexString()
 const assetDto = (asset: Asset) => ({ ...asset, _id: asId(asset._id), createdAt: asset.createdAt.toISOString() })
+const assetCommentDto = (comment: AssetComment) => ({ ...comment, _id: asId(comment._id), assetId: comment.assetId.toHexString(), authorId: asId(comment.authorId), createdAt: comment.createdAt.toISOString(), updatedAt: comment.updatedAt.toISOString() })
 const publicationDto = (publication: Publication) => ({
   ...publication,
   _id: asId(publication._id),
@@ -181,6 +182,37 @@ app.post('/v1/assets', async (request, reply) => {
   const asset: Asset = { ...input, createdAt: new Date() }
   const result = await (await db()).collection<Asset>('assets').insertOne(asset)
   return reply.code(201).send({ data: assetDto({ ...asset, _id: result.insertedId }) })
+})
+
+app.get('/v1/assets/:assetId/comments', async (request, reply) => {
+  const { assetId } = z.object({ assetId: objectId }).parse(request.params)
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  const database = await db()
+  const asset = await database.collection<Asset>('assets').findOne({ _id: new ObjectId(assetId), workspaceId: id })
+  if (!asset) return reply.code(404).send({ error: 'Ce média est introuvable dans cet espace.' })
+  const comments = await database.collection<AssetComment>('assetComments').find({ assetId: asset._id, workspaceId: id }).sort({ createdAt: 1 }).toArray()
+  return { data: comments.map(assetCommentDto) }
+})
+
+app.post('/v1/assets/:assetId/comments', async (request, reply) => {
+  const { assetId } = z.object({ assetId: objectId }).parse(request.params)
+  const input = z.object({ workspaceId, body: z.string().trim().min(1, 'Écrivez un commentaire.').max(2_000) }).parse(request.body)
+  const database = await db()
+  const asset = await database.collection<Asset>('assets').findOne({ _id: new ObjectId(assetId), workspaceId: input.workspaceId })
+  if (!asset) return reply.code(404).send({ error: 'Ce média est introuvable dans cet espace.' })
+  const now = new Date()
+  const author = request.authUser!
+  const comment: AssetComment = {
+    workspaceId: input.workspaceId,
+    assetId: asset._id!,
+    authorId: author._id,
+    authorEmail: author.email,
+    body: input.body,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const result = await database.collection<AssetComment>('assetComments').insertOne(comment)
+  return reply.code(201).send({ data: assetCommentDto({ ...comment, _id: result.insertedId }) })
 })
 
 app.get('/v1/publications', async (request) => {

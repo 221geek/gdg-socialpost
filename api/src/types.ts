@@ -15,6 +15,17 @@ export interface Asset {
   createdAt: Date
 }
 
+export interface AssetComment {
+  _id?: ObjectId
+  workspaceId: string
+  assetId: ObjectId
+  authorId?: ObjectId
+  authorEmail: string
+  body: string
+  createdAt: Date
+  updatedAt: Date
+}
+
 export interface Publication {
   _id?: ObjectId
   workspaceId: string

@@ -4,13 +4,14 @@ import {
   ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Clock3, FileVideo,
   FolderOpen, Grid2X2, Image, ImagePlus, LayoutDashboard, LoaderCircle,
   MoreHorizontal, Plus, Search, Send, Settings2, Upload, Video, X, AlertCircle,
-  BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart, LogOut, ShieldCheck, Users, AtSign
+  BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart, LogOut, ShieldCheck, Users, AtSign, MessageCircle
 } from 'lucide-react'
 import './styles.css'
 import './pages.css'
 import './type.css'
 import './live.css'
 import './profile.css'
+import './discussion.css'
 
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '')
 const N8N_URL = 'https://n8n-gdg.abdoulazizdione.cloud'
@@ -74,6 +75,7 @@ function Workspace({ session, onSignedOut }) {
   const [connections, setConnections] = useState([])
   const [analytics, setAnalytics] = useState(null)
   const [selected, setSelected] = useState(null)
+  const [discussionAsset, setDiscussionAsset] = useState(null)
   const [composerOpen, setComposerOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -122,12 +124,13 @@ function Workspace({ session, onSignedOut }) {
       {!error && loading && <LoadingState />}
       {!error && !loading && activeTab === 'overview' && <OverviewPage dashboard={dashboard} publications={publications} assets={assetMap} connections={connections} setActiveTab={setActiveTab} setComposerOpen={setComposerOpen} />}
       {!error && !loading && activeTab === 'calendar' && <CalendarPage publications={publications} assets={assetMap} onSelect={setSelected} setComposerOpen={setComposerOpen} />}
-      {!error && !loading && activeTab === 'media' && <MediaPage assets={assets} refresh={refresh} flash={flash} setComposerOpen={setComposerOpen} />}
+      {!error && !loading && activeTab === 'media' && <MediaPage assets={assets} refresh={refresh} flash={flash} setComposerOpen={setComposerOpen} onDiscuss={setDiscussionAsset} />}
       {!error && !loading && activeTab === 'analytics' && <AnalyticsPage analytics={analytics} />}
       {!error && !loading && activeTab === 'settings' && <SettingsPage connections={connections} session={session} onSignedOut={onSignedOut} />}
     </main>
     {activeTab === 'calendar' && selected && <PublicationPanel publication={selected} asset={assetMap.get(selected.assetId)} onClose={() => setSelected(null)} />}
     {composerOpen && <Composer assets={assets} refresh={refresh} onClose={() => setComposerOpen(false)} onCreated={onCreated} />}
+    {discussionAsset && <AssetDiscussion asset={discussionAsset} session={session} onClose={() => setDiscussionAsset(null)} />}
     {notice && <div className="toast"><Check size={16}/>{notice}</div>}
   </div>
 }
@@ -149,11 +152,19 @@ function OverviewPage({ dashboard, publications, assets, connections, setActiveT
 
 function CalendarPage({ publications, assets, onSelect, setComposerOpen }) { return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">CALENDRIER</span><h1>Vos publications.</h1><p>Planifiez vos médias sans dépendre de données de démonstration.</p></div><button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={17}/>Créer une publication</button></div><div className="surface publication-list"><div className="list-head"><span>CONTENU</span><span>DIFFUSION</span><span>DESTINATIONS</span><span>STATUT</span></div>{publications.length ? publications.map((publication) => <button className="publication-row" key={publication._id} onClick={() => onSelect(publication)}><AssetPreview asset={assets.get(publication.assetId)} /><div><b>{publication.title}</b><small>{assets.get(publication.assetId)?.name || 'Média introuvable'}</small></div><span>{formatDate(publication.scheduledAt)}</span><NetworkStack items={publication.destinations}/><span className={`status status-${publication.status}`}>{statusLabel[publication.status]}</span></button>) : <EmptyBlock title="Votre calendrier est vide" copy="Ajoutez un média et programmez votre première diffusion." action="Créer une publication" onAction={() => setComposerOpen(true)} />}</div></section> }
 
-function MediaPage({ assets, refresh, flash, setComposerOpen }) {
+function MediaPage({ assets, refresh, flash, setComposerOpen, onDiscuss }) {
   const inputRef = useRef(null); const [uploading, setUploading] = useState(false); const [query, setQuery] = useState('')
   const upload = async (file) => { if (!file) return; setUploading(true); try { const form = new FormData(); form.append('workspaceId', WORKSPACE_ID); form.append('file', file); await request('/v1/assets/upload', { method: 'POST', body: form }); await refresh(); flash('Média importé.'); } catch (cause) { flash(cause.message) } finally { setUploading(false); if (inputRef.current) inputRef.current.value = '' } }
   const filtered = assets.filter((asset) => asset.name.toLowerCase().includes(query.toLowerCase()))
-  return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">BIBLIOTHÈQUE</span><h1>Vos médias.</h1><p>Les fichiers importés sont stockés par l’API Relay.</p></div><button className="primary-button" onClick={() => inputRef.current?.click()}><Upload size={16}/>{uploading ? 'Import en cours…' : 'Importer un média'}</button></div><input ref={inputRef} className="visually-hidden" type="file" accept="image/*,video/*" onChange={(event) => upload(event.target.files?.[0])}/><div className="media-tools"><div className="media-search"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher un fichier" /></div><span className="filter-chip active">{assets.length} fichier{assets.length > 1 ? 's' : ''}</span></div><div className="media-layout"><button className="upload-tile" onClick={() => inputRef.current?.click()}><ImagePlus size={23}/><b>Ajouter un média</b><span>Images ou vidéos · 2 Go maximum</span></button>{filtered.map((asset) => <article className="media-tile" key={asset._id}><AssetPreview asset={asset} library/><div><b>{asset.name}</b><small>{mediaType(asset)} · importé le {formatDate(asset.createdAt, false)}</small></div></article>)}</div>{!assets.length && <p className="quiet-copy">Aucun média n’a encore été importé.</p>}<button className="floating-composer" onClick={() => setComposerOpen(true)}>Créer depuis la médiathèque</button></section>
+  return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">BIBLIOTHÈQUE</span><h1>Vos médias.</h1><p>Ajoutez vos retours avant de programmer une publication.</p></div><button className="primary-button" onClick={() => inputRef.current?.click()}><Upload size={16}/>{uploading ? 'Import en cours…' : 'Importer un média'}</button></div><input ref={inputRef} className="visually-hidden" type="file" accept="image/*,video/*" onChange={(event) => upload(event.target.files?.[0])}/><div className="media-tools"><div className="media-search"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher un fichier" /></div><span className="filter-chip active">{assets.length} fichier{assets.length > 1 ? 's' : ''}</span></div><div className="media-layout"><button className="upload-tile" onClick={() => inputRef.current?.click()}><ImagePlus size={23}/><b>Ajouter un média</b><span>Images ou vidéos · 2 Go maximum</span></button>{filtered.map((asset) => <article className="media-tile" key={asset._id}><AssetPreview asset={asset} library/><div><b>{asset.name}</b><small>{mediaType(asset)} · importé le {formatDate(asset.createdAt, false)}</small></div><button className="media-discuss" onClick={() => onDiscuss(asset)}><MessageCircle size={14}/>Discuter</button></article>)}</div>{!assets.length && <p className="quiet-copy">Aucun média n’a encore été importé.</p>}<button className="floating-composer" onClick={() => setComposerOpen(true)}>Créer depuis la médiathèque</button></section>
+}
+
+function AssetDiscussion({ asset, session, onClose }) {
+  const [comments, setComments] = useState(null); const [body, setBody] = useState(''); const [saving, setSaving] = useState(false); const [error, setError] = useState('')
+  const load = async () => { try { setComments(await request(`/v1/assets/${asset._id}/comments?workspaceId=${WORKSPACE_ID}`)) } catch (cause) { setError(cause.message) } }
+  useEffect(() => { load() }, [asset._id])
+  const submit = async (event) => { event.preventDefault(); if (!body.trim() || saving) return; setSaving(true); setError(''); try { const comment = await request(`/v1/assets/${asset._id}/comments`, { method: 'POST', body: JSON.stringify({ workspaceId: WORKSPACE_ID, body: body.trim() }) }); setComments((current) => [...(current || []), comment]); setBody('') } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
+  return <div className="modal-backdrop discussion-backdrop" role="dialog" aria-modal="true" aria-label={`Discussion sur ${asset.name}`}><section className="discussion-panel"><button className="modal-close" onClick={onClose} aria-label="Fermer la discussion"><X size={18}/></button><div className="discussion-heading"><span className="eyebrow">DISCUSSION D’ÉQUIPE</span><h2>Vos retours sur ce contenu.</h2><p>Les commentaires sont visibles par tous les membres de Relay avant publication.</p></div><div className="discussion-context"><AssetPreview asset={asset} library/><div><b>{asset.name}</b><small>{mediaType(asset)} · importé le {formatDate(asset.createdAt, false)}</small></div></div><div className="comment-stream">{comments === null ? <div className="comment-loading"><LoaderCircle size={17} className="spin"/>Chargement de la discussion…</div> : comments.length ? comments.map((comment) => <article className={comment.authorEmail === session.email ? 'comment-entry mine' : 'comment-entry'} key={comment._id}><span className="comment-avatar">{comment.authorEmail.slice(0, 1).toUpperCase()}</span><div><header><b>{comment.authorEmail === session.email ? 'Vous' : comment.authorEmail}</b><time>{formatDate(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>) : <div className="comment-empty"><MessageCircle size={20}/><b>La discussion commence ici.</b><p>Partagez une idée, une correction ou une validation.</p></div>}</div>{error && <p className="form-error">{error}</p>}<form className="comment-form" onSubmit={submit}><span className="comment-avatar current">{session.email.slice(0, 1).toUpperCase()}</span><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Ajouter un commentaire…" maxLength="2000" rows="3"/><button className="primary-button" disabled={saving || !body.trim()}>{saving ? <LoaderCircle size={15} className="spin"/> : <Send size={15}/>}Envoyer</button></form></section></div>
 }
 
 function AnalyticsPage({ analytics }) { return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">PERFORMANCES</span><h1>Les résultats vérifiés.</h1><p>Les statistiques détaillées seront disponibles lorsque les plateformes renverront leurs insights.</p></div></div><div className="metric-grid analytics-metrics"><Metric icon={Send} value={analytics?.published || 0} label="livraisons confirmées"/><Metric icon={Eye} value="—" label="portée synchronisée"/><Metric icon={Heart} value="—" label="interactions synchronisées"/></div><div className="surface analytics-empty"><BarMessage/><h2>{analytics?.metricsAvailable ? 'Données synchronisées' : 'Insights non disponibles'}</h2><p>Relay affiche ici uniquement les métriques retournées par les API des plateformes. Connectez les applications OAuth dans n8n puis activez leurs nœuds de récupération d’insights.</p>{analytics?.byPlatform?.length ? <div className="delivery-summary">{analytics.byPlatform.map((item) => <span key={item.platform}>{platformMeta[item.platform]?.label} · {item.published} livraison{item.published > 1 ? 's' : ''}</span>)}</div> : null}</div></section> }
