@@ -11,6 +11,7 @@ export async function db() {
     database = client.db()
     await database.collection('assets').createIndex({ workspaceId: 1, createdAt: -1 })
     await database.collection('assetComments').createIndex({ assetId: 1, createdAt: 1 })
+    await database.collection('publicationComments').createIndex({ publicationId: 1, createdAt: 1 })
     await database.collection('publications').createIndex({ workspaceId: 1, scheduledAt: 1 })
     await database.collection('publications').createIndex({ status: 1, scheduledAt: 1 })
     await database.collection('assets').createIndex({ workspaceId: 1, createdAt: -1 })

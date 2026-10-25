@@ -5,7 +5,7 @@ import {
   FolderOpen, Grid2X2, Image, ImagePlus, LayoutDashboard, LoaderCircle,
   MoreHorizontal, Plus, Search, Send, Settings2, Upload, Video, X, AlertCircle,
   BriefcaseBusiness, Play, RefreshCw, ExternalLink, Eye, Heart, LogOut, ShieldCheck, Users, AtSign, MessageCircle,
-  Pencil, Rocket, RotateCcw, ScrollText
+  Pencil, Rocket, RotateCcw, ScrollText, Trash2, CalendarClock
 } from 'lucide-react'
 import './styles.css'
 import './pages.css'
@@ -81,7 +81,8 @@ function Workspace({ session, onSignedOut }) {
   const [dashboard, setDashboard] = useState(null)
   const [connections, setConnections] = useState([])
   const [analytics, setAnalytics] = useState(null)
-  const [selectedId, setSelectedId] = useState(null)
+  const [selection, setSelection] = useState(null)
+  const openPublication = (id, mode = 'view') => setSelection({ id, mode })
   const [discussionAsset, setDiscussionAsset] = useState(null)
   const [composerOpen, setComposerOpen] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -110,9 +111,11 @@ function Workspace({ session, onSignedOut }) {
     refresh()
   }, [])
   const flash = (message) => { setNotice(message); window.setTimeout(() => setNotice(''), 3500) }
-  const onCreated = async (publication) => { await refresh(); setSelectedId(publication._id); setActiveTab('calendar'); flash('Publication enregistrée et programmée.') }
+  const onCreated = async (publication) => { await refresh(); openPublication(publication._id); setActiveTab('calendar'); flash('Publication enregistrée et programmée.') }
   const replacePublication = (updated) => setPublications((current) => current.map((item) => item._id === updated._id ? updated : item))
-  const selected = publications.find((item) => item._id === selectedId)
+  const selected = publications.find((item) => item._id === selection?.id)
+  const removePublication = (id) => { setPublications((current) => current.filter((item) => item._id !== id)); setSelection(null) }
+  const bumpComments = (id) => setPublications((current) => current.map((item) => item._id === id ? { ...item, commentCount: (item.commentCount || 0) + 1 } : item))
   const inFlight = publications.some((item) => item.status === 'dispatching' || (item.status === 'scheduled' && new Date(item.scheduledAt).getTime() < Date.now() + 60_000))
   const reloadPublications = () => request(`/v1/publications?workspaceId=${WORKSPACE_ID}`).then(setPublications).catch(() => {})
   useEffect(() => {
@@ -140,13 +143,13 @@ function Workspace({ session, onSignedOut }) {
       <header className="topbar"><div className="crumb"><span>Relay</span><ChevronRight size={15}/><b>{pageTitle}</b></div><div className="header-actions"><button className="icon-button" onClick={refresh} aria-label="Actualiser"><RefreshCw size={17}/></button><button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={18}/>Créer une publication</button></div></header>
       {error && <ApiError message={error} onRetry={refresh} />}
       {!error && loading && <LoadingState />}
-      {!error && !loading && activeTab === 'overview' && <OverviewPage dashboard={dashboard} publications={publications} assets={assetMap} connections={connections} setActiveTab={setActiveTab} setComposerOpen={setComposerOpen} onOpen={setSelectedId} />}
-      {!error && !loading && activeTab === 'calendar' && <PublicationsPage publications={publications} assets={assetMap} onOpen={setSelectedId} onChanged={replacePublication} flash={flash} setComposerOpen={setComposerOpen} />}
+      {!error && !loading && activeTab === 'overview' && <OverviewPage dashboard={dashboard} publications={publications} assets={assetMap} connections={connections} setActiveTab={setActiveTab} setComposerOpen={setComposerOpen} onOpen={openPublication} />}
+      {!error && !loading && activeTab === 'calendar' && <PublicationsPage publications={publications} assets={assetMap} onOpen={openPublication} onChanged={replacePublication} flash={flash} setComposerOpen={setComposerOpen} />}
       {!error && !loading && activeTab === 'media' && <MediaPage assets={assets} refresh={refresh} flash={flash} setComposerOpen={setComposerOpen} onDiscuss={setDiscussionAsset} />}
       {!error && !loading && activeTab === 'analytics' && <AnalyticsPage analytics={analytics} />}
       {!error && !loading && activeTab === 'settings' && <SettingsPage connections={connections} session={session} onSignedOut={onSignedOut} />}
     </main>
-    {selected && <PublicationStudio publication={selected} asset={assetMap.get(selected.assetId)} onClose={() => setSelectedId(null)} onChanged={replacePublication} onPoll={reloadPublications} flash={flash} />}
+    {selected && <PublicationStudio key={selected._id} publication={selected} asset={assetMap.get(selected.assetId)} session={session} initialMode={selection.mode} onClose={() => setSelection(null)} onChanged={replacePublication} onDeleted={removePublication} onCommented={bumpComments} onPoll={reloadPublications} flash={flash} />}
     {composerOpen && <Composer assets={assets} refresh={refresh} onClose={() => setComposerOpen(false)} onCreated={onCreated} />}
     {discussionAsset && <AssetDiscussion asset={discussionAsset} session={session} onClose={() => setDiscussionAsset(null)} />}
     {notice && <div className="toast"><Check size={16}/>{notice}</div>}
@@ -170,6 +173,7 @@ function OverviewPage({ dashboard, publications, assets, connections, setActiveT
 
 const publicationFilters = [['all', 'Toutes'], ['scheduled', 'Programmées'], ['dispatching', 'En cours'], ['published', 'Publiées'], ['failed', 'Échecs'], ['draft', 'Brouillons']]
 const canPublishNow = (publication) => ['draft', 'scheduled', 'failed'].includes(publication.status)
+const canEdit = (publication) => ['draft', 'scheduled', 'failed'].includes(publication.status) || isStuck(publication)
 const isStuck = (publication) => publication.status === 'dispatching' && Date.now() - new Date(publication.updatedAt).getTime() > 20 * 60 * 1000
 
 async function publishNow(publication, onChanged, flash) {
@@ -187,15 +191,21 @@ function PublicationsPage({ publications, assets, onOpen, onChanged, flash, setC
     {visible.length ? <div className="reel-grid">{visible.map((publication) => { const asset = assets.get(publication.assetId); return <article className="reel" key={publication._id}>
       <div className="reel-media">{asset ? asset.kind === 'video' ? <video src={asset.publicUrl} controls playsInline preload="metadata" /> : <img src={asset.publicUrl} alt={asset.name}/> : <div className="reel-missing"><Image size={20}/>Média introuvable</div>}<span className={`status status-${publication.status} reel-status`}>{publication.status === 'dispatching' && <LoaderCircle size={11} className="spin"/>}{statusLabel[publication.status]}</span></div>
       <button className="reel-title" onClick={() => onOpen(publication._id)}><b>{publication.title}</b><ChevronRight size={15}/></button>
-      <div className="reel-meta"><span><Clock3 size={13}/>{formatDate(publication.scheduledAt)}</span><NetworkStack items={publication.destinations}/></div>
+      <div className="reel-meta"><span className={publication.status === 'scheduled' && new Date(publication.scheduledAt) < new Date() ? 'overdue' : ''}><Clock3 size={13}/>{formatDate(publication.scheduledAt)}</span><span className="reel-meta-end">{publication.commentCount > 0 && <button className="reel-comments" onClick={() => onOpen(publication._id)} aria-label={`${publication.commentCount} commentaire(s)`}><MessageCircle size={13}/>{publication.commentCount}</button>}<NetworkStack items={publication.destinations}/></span></div>
       {publication.lastError && <p className="reel-error"><AlertCircle size={13}/>{publication.lastError}</p>}
-      <div className="reel-actions"><button className="text-button" onClick={() => onOpen(publication._id)}><ScrollText size={13}/>Détails et journal</button>{canPublishNow(publication) && <button className="text-button" onClick={() => publishNow(publication, onChanged, flash)}>{publication.status === 'failed' ? <><RotateCcw size={13}/>Relancer</> : <><Rocket size={13}/>Publier maintenant</>}</button>}{isStuck(publication) && <button className="text-button" onClick={() => publishNow(publication, onChanged, flash)}><RotateCcw size={13}/>Relancer</button>}</div>
+      <div className="reel-actions"><button className="text-button" onClick={() => onOpen(publication._id)}><MessageCircle size={13}/>Détails et discussion</button>{canEdit(publication) && <button className="text-button" onClick={() => onOpen(publication._id, 'edit')}><CalendarClock size={13}/>Reprogrammer</button>}{canPublishNow(publication) && <button className="text-button" onClick={() => publishNow(publication, onChanged, flash)}>{publication.status === 'failed' ? <><RotateCcw size={13}/>Relancer</> : <><Rocket size={13}/>Publier maintenant</>}</button>}{isStuck(publication) && <button className="text-button" onClick={() => publishNow(publication, onChanged, flash)}><RotateCcw size={13}/>Relancer</button>}</div>
     </article> })}</div> : <EmptyBlock title={publications.length ? 'Aucune publication dans ce filtre' : 'Aucune publication pour l’instant'} copy="Ajoutez un média et programmez sa diffusion." action="Créer une publication" onAction={() => setComposerOpen(true)} />}
   </section>
 }
 
-function PublicationStudio({ publication, asset, onClose, onChanged, onPoll, flash }) {
-  const [editing, setEditing] = useState(false)
+async function deletePublication(publication, onDeleted, flash) {
+  const warning = publication.status === 'published' ? 'Supprimer cette publication de Relay ? Le post déjà publié sur les réseaux ne sera pas supprimé.' : 'Supprimer définitivement cette publication ? Sa programmation, son journal et sa discussion seront effacés.'
+  if (!window.confirm(warning)) return
+  try { await request(`/v1/publications/${publication._id}?workspaceId=${WORKSPACE_ID}`, { method: 'DELETE' }); onDeleted(publication._id); flash('Publication supprimée.') } catch (cause) { flash(cause.message) }
+}
+
+function PublicationStudio({ publication, asset, session, initialMode, onClose, onChanged, onDeleted, onCommented, onPoll, flash }) {
+  const [editing, setEditing] = useState(initialMode === 'edit')
   const [events, setEvents] = useState(null)
   const live = publication.status === 'dispatching' || publication.status === 'scheduled'
   useEffect(() => {
@@ -206,20 +216,28 @@ function PublicationStudio({ publication, asset, onClose, onChanged, onPoll, fla
     return () => { cancelled = true; if (timer) window.clearInterval(timer) }
   }, [publication._id, live, publication.updatedAt])
   useEffect(() => { const onKey = (event) => event.key === 'Escape' && onClose(); window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey) }, [onClose])
-  const editable = ['draft', 'scheduled', 'failed'].includes(publication.status)
+  const overdue = publication.status === 'scheduled' && new Date(publication.scheduledAt) < new Date()
   return <div className="modal-backdrop studio-backdrop" role="dialog" aria-modal="true" aria-label={publication.title} onClick={(event) => event.target === event.currentTarget && onClose()}><section className="studio">
     <div className="studio-media">{asset ? asset.kind === 'video' ? <video src={asset.publicUrl} controls autoPlay playsInline preload="auto" /> : <img src={asset.publicUrl} alt={asset.name}/> : <div className="reel-missing"><Image size={22}/>Média introuvable</div>}</div>
-    <div className="studio-side">
-      <header className="studio-head"><span className={`status status-${publication.status}`}>{publication.status === 'dispatching' && <LoaderCircle size={11} className="spin"/>}{statusLabel[publication.status]}</span><button className="icon-button" onClick={onClose} aria-label="Fermer"><X size={18}/></button></header>
-      {editing ? <PublicationEditor publication={publication} onCancel={() => setEditing(false)} onSaved={(updated) => { onChanged(updated); setEditing(false); flash('Publication et planification mises à jour.') }} /> : <>
+    <div className="studio-content">
+      <header className="studio-head"><span className={`status status-${publication.status}`}>{publication.status === 'dispatching' && <LoaderCircle size={11} className="spin"/>}{statusLabel[publication.status]}</span></header>
+      {editing ? <PublicationEditor publication={publication} focusSchedule={initialMode === 'edit'} onCancel={() => setEditing(false)} onSaved={(updated) => { onChanged(updated); setEditing(false); flash('Publication reprogrammée.') }} /> : <>
         <h2>{publication.title}</h2>
         <p className="studio-caption">{publication.caption || 'Aucune légende ajoutée.'}</p>
-        <dl className="studio-facts"><div><dt>Programmée</dt><dd>{formatDate(publication.scheduledAt)}</dd></div>{publication.publishedAt && <div><dt>Publiée</dt><dd>{formatDate(publication.publishedAt)}</dd></div>}<div><dt>Fichier</dt><dd>{asset ? `${asset.name} · ${mediaType(asset)}` : '—'}</dd></div></dl>
+        <dl className="studio-facts"><div><dt>Programmée</dt><dd className={overdue ? 'overdue' : ''}>{formatDate(publication.scheduledAt)}{overdue && ' · heure dépassée'}</dd></div>{publication.publishedAt && <div><dt>Publiée</dt><dd>{formatDate(publication.publishedAt)}</dd></div>}<div><dt>Fichier</dt><dd>{asset ? `${asset.name} · ${mediaType(asset)}` : '—'}</dd></div></dl>
         <div className="studio-destinations">{publication.destinations.map((name) => { const meta = platformMeta[name]; const Icon = meta.icon; const delivery = publication.deliveries?.[name]; return <div className="destination" key={name}><span className="network-logo" style={{ color: meta.color, background: meta.bg }}><Icon size={16}/></span><span><b>{meta.label}</b><small className={delivery?.status === 'failed' ? 'delivery-failed' : ''}>{delivery ? delivery.error || deliveryLabel[delivery.status] : publication.status === 'dispatching' ? 'Diffusion en cours…' : 'Pas encore diffusé'}</small></span>{delivery?.externalUrl && <a className="text-button" href={delivery.externalUrl} target="_blank" rel="noreferrer">Voir le post <ExternalLink size={12}/></a>}</div> })}</div>
-        <div className="studio-actions">{editable && <button className="secondary-button" onClick={() => setEditing(true)}><Pencil size={14}/>Modifier</button>}{(canPublishNow(publication) || isStuck(publication)) && <button className="primary-button" onClick={() => publishNow(publication, onChanged, flash)}>{publication.status === 'draft' || publication.status === 'scheduled' ? <><Rocket size={14}/>Publier maintenant</> : <><RotateCcw size={14}/>Relancer</>}</button>}</div>
       </>}
       <DeliveryLog events={events} live={live} />
     </div>
+    <aside className="studio-side">
+      <div className="studio-side-head"><span className="eyebrow">ACTIONS</span><button className="icon-button" onClick={onClose} aria-label="Fermer"><X size={18}/></button></div>
+      <div className="studio-actions">
+        {(canPublishNow(publication) || isStuck(publication)) && <button className="primary-button" onClick={() => publishNow(publication, onChanged, flash)}>{publication.status === 'draft' || publication.status === 'scheduled' ? <><Rocket size={14}/>Publier maintenant</> : <><RotateCcw size={14}/>Relancer</>}</button>}
+        {canEdit(publication) && !editing && <button className="secondary-button" onClick={() => setEditing(true)}><CalendarClock size={14}/>Reprogrammer / modifier</button>}
+        {(publication.status !== 'dispatching' || isStuck(publication)) && <button className="danger-button" onClick={() => deletePublication(publication, onDeleted, flash)}><Trash2 size={14}/>Supprimer</button>}
+      </div>
+      <div className="studio-thread"><span className="eyebrow">DISCUSSION D’ÉQUIPE</span><CommentThread path={`/v1/publications/${publication._id}/comments`} session={session} onPosted={() => onCommented(publication._id)} /></div>
+    </aside>
   </section></div>
 }
 
@@ -236,12 +254,25 @@ function MediaPage({ assets, refresh, flash, setComposerOpen, onDiscuss }) {
   return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">BIBLIOTHÈQUE</span><h1>Vos médias.</h1><p>Ajoutez vos retours avant de programmer une publication.</p></div><button className="primary-button" onClick={() => inputRef.current?.click()}><Upload size={16}/>{uploading ? 'Import en cours…' : 'Importer un média'}</button></div><input ref={inputRef} className="visually-hidden" type="file" accept="image/*,video/*" onChange={(event) => upload(event.target.files?.[0])}/><div className="media-tools"><div className="media-search"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher un fichier" /></div><span className="filter-chip active">{assets.length} fichier{assets.length > 1 ? 's' : ''}</span></div><div className="media-layout"><button className="upload-tile" onClick={() => inputRef.current?.click()}><ImagePlus size={23}/><b>Ajouter un média</b><span>Images ou vidéos · 2 Go maximum</span></button>{filtered.map((asset) => <article className="media-tile" key={asset._id}><AssetPreview asset={asset} library/><div><b>{asset.name}</b><small>{mediaType(asset)} · importé le {formatDate(asset.createdAt, false)}</small></div><button className="media-discuss" onClick={() => onDiscuss(asset)}><MessageCircle size={14}/>Discuter</button></article>)}</div>{!assets.length && <p className="quiet-copy">Aucun média n’a encore été importé.</p>}<button className="floating-composer" onClick={() => setComposerOpen(true)}>Créer depuis la médiathèque</button></section>
 }
 
-function AssetDiscussion({ asset, session, onClose }) {
+function CommentThread({ path, session, onPosted }) {
   const [comments, setComments] = useState(null); const [body, setBody] = useState(''); const [saving, setSaving] = useState(false); const [error, setError] = useState('')
-  const load = async () => { try { setComments(await request(`/v1/assets/${asset._id}/comments?workspaceId=${WORKSPACE_ID}`)) } catch (cause) { setError(cause.message) } }
-  useEffect(() => { load() }, [asset._id])
-  const submit = async (event) => { event.preventDefault(); if (!body.trim() || saving) return; setSaving(true); setError(''); try { const comment = await request(`/v1/assets/${asset._id}/comments`, { method: 'POST', body: JSON.stringify({ workspaceId: WORKSPACE_ID, body: body.trim() }) }); setComments((current) => [...(current || []), comment]); setBody('') } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
-  return <div className="modal-backdrop discussion-backdrop" role="dialog" aria-modal="true" aria-label={`Discussion sur ${asset.name}`}><section className="discussion-panel"><button className="modal-close" onClick={onClose} aria-label="Fermer la discussion"><X size={18}/></button><div className="discussion-heading"><span className="eyebrow">DISCUSSION D’ÉQUIPE</span><h2>Vos retours sur ce contenu.</h2><p>Les commentaires sont visibles par tous les membres de Relay avant publication.</p></div><div className="discussion-context"><AssetPreview asset={asset} library/><div><b>{asset.name}</b><small>{mediaType(asset)} · importé le {formatDate(asset.createdAt, false)}</small></div></div><div className="comment-stream">{comments === null ? <div className="comment-loading"><LoaderCircle size={17} className="spin"/>Chargement de la discussion…</div> : comments.length ? comments.map((comment) => <article className={comment.authorEmail === session.email ? 'comment-entry mine' : 'comment-entry'} key={comment._id}><span className="comment-avatar">{comment.authorEmail.slice(0, 1).toUpperCase()}</span><div><header><b>{comment.authorEmail === session.email ? 'Vous' : comment.authorEmail}</b><time>{formatDate(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>) : <div className="comment-empty"><MessageCircle size={20}/><b>La discussion commence ici.</b><p>Partagez une idée, une correction ou une validation.</p></div>}</div>{error && <p className="form-error">{error}</p>}<form className="comment-form" onSubmit={submit}><span className="comment-avatar current">{session.email.slice(0, 1).toUpperCase()}</span><textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Ajouter un commentaire…" maxLength="2000" rows="3"/><button className="primary-button" disabled={saving || !body.trim()}>{saving ? <LoaderCircle size={15} className="spin"/> : <Send size={15}/>}Envoyer</button></form></section></div>
+  const endRef = useRef(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = () => request(`${path}?workspaceId=${WORKSPACE_ID}`).then((data) => { if (!cancelled) setComments(data) }).catch((cause) => { if (!cancelled) setError(cause.message) })
+    load()
+    // Teammates comment in parallel: refresh the thread while it is open.
+    const timer = window.setInterval(load, 15000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [path])
+  useEffect(() => { endRef.current?.scrollIntoView({ block: 'nearest' }) }, [comments?.length])
+  const submit = async (event) => { event.preventDefault(); if (!body.trim() || saving) return; setSaving(true); setError(''); try { const comment = await request(path, { method: 'POST', body: JSON.stringify({ workspaceId: WORKSPACE_ID, body: body.trim() }) }); setComments((current) => [...(current || []), comment]); setBody(''); onPosted?.() } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
+  const onKeyDown = (event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submit(event) }
+  return <><div className="comment-stream">{comments === null ? <div className="comment-loading"><LoaderCircle size={17} className="spin"/>Chargement de la discussion…</div> : comments.length ? comments.map((comment) => <article className={comment.authorEmail === session.email ? 'comment-entry mine' : 'comment-entry'} key={comment._id}><span className="comment-avatar">{comment.authorEmail.slice(0, 1).toUpperCase()}</span><div><header><b>{comment.authorEmail === session.email ? 'Vous' : comment.authorEmail}</b><time>{formatDate(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>) : <div className="comment-empty"><MessageCircle size={20}/><b>La discussion commence ici.</b><p>Partagez une idée, une correction ou une validation.</p></div>}<span ref={endRef} /></div>{error && <p className="form-error">{error}</p>}<form className="comment-form" onSubmit={submit}><span className="comment-avatar current">{session.email.slice(0, 1).toUpperCase()}</span><textarea value={body} onChange={(event) => setBody(event.target.value)} onKeyDown={onKeyDown} placeholder="Ajouter un commentaire…" maxLength="2000" rows="3"/><button className="primary-button" disabled={saving || !body.trim()}>{saving ? <LoaderCircle size={15} className="spin"/> : <Send size={15}/>}Envoyer</button></form></>
+}
+
+function AssetDiscussion({ asset, session, onClose }) {
+  return <div className="modal-backdrop discussion-backdrop" role="dialog" aria-modal="true" aria-label={`Discussion sur ${asset.name}`}><section className="discussion-panel"><button className="modal-close" onClick={onClose} aria-label="Fermer la discussion"><X size={18}/></button><div className="discussion-heading"><span className="eyebrow">DISCUSSION D’ÉQUIPE</span><h2>Vos retours sur ce contenu.</h2><p>Les commentaires sont visibles par tous les membres de Relay avant publication.</p></div><div className="discussion-context"><AssetPreview asset={asset} library/><div><b>{asset.name}</b><small>{mediaType(asset)} · importé le {formatDate(asset.createdAt, false)}</small></div></div><CommentThread path={`/v1/assets/${asset._id}/comments`} session={session} /></section></div>
 }
 
 function AnalyticsPage({ analytics }) { return <section className="content-area product-page"><div className="page-title-row"><div><span className="eyebrow">PERFORMANCES</span><h1>Les résultats vérifiés.</h1><p>Les statistiques détaillées seront disponibles lorsque les plateformes renverront leurs insights.</p></div></div><div className="metric-grid analytics-metrics"><Metric icon={Send} value={analytics?.published || 0} label="livraisons confirmées"/><Metric icon={Eye} value="—" label="portée synchronisée"/><Metric icon={Heart} value="—" label="interactions synchronisées"/></div><div className="surface analytics-empty"><BarMessage/><h2>{analytics?.metricsAvailable ? 'Données synchronisées' : 'Insights non disponibles'}</h2><p>Relay affiche ici uniquement les métriques retournées par les API des plateformes. Connectez les applications OAuth dans n8n puis activez leurs nœuds de récupération d’insights.</p>{analytics?.byPlatform?.length ? <div className="delivery-summary">{analytics.byPlatform.map((item) => <span key={item.platform}>{platformMeta[item.platform]?.label} · {item.published} livraison{item.published > 1 ? 's' : ''}</span>)}</div> : null}</div></section> }
@@ -276,10 +307,10 @@ function Composer({ assets, refresh, onClose, onCreated }) {
   return <div className="modal-backdrop"><div className="composer real-composer"><button className="modal-close" onClick={onClose}><X size={18}/></button><span className="eyebrow">NOUVELLE PUBLICATION</span><h2>Préparez une diffusion.</h2><p>Chaque champ ci-dessous est enregistré dans votre espace MongoDB.</p>{error && <p className="form-error">{error}</p>}<input ref={fileRef} className="visually-hidden" type="file" accept="image/*,video/*" onChange={(event) => uploadAndSelect(event.target.files?.[0])}/><div className="composer-grid"><label>Titre<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ex. Annonce du lancement"/></label><label>Média<select value={selectedAsset} onChange={(event) => setSelectedAsset(event.target.value)}><option value="">Choisir un média</option>{assets.map((asset) => <option value={asset._id} key={asset._id}>{asset.name}</option>)}</select><button className="text-button upload-inline" onClick={() => fileRef.current?.click()}><Upload size={14}/>Importer un nouveau fichier</button></label><label className="span-two">Légende<textarea value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Écrivez la légende qui sera envoyée aux plateformes." rows="4"/></label><label>Planification<input type="datetime-local" min={toLocalInput(Date.now() + 60_000)} value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)}/></label><div><span className="field-label">Destinations</span><div className="channel-selector">{Object.entries(platformMeta).map(([key, meta]) => { const Icon = meta.icon; const enabled = destinations.includes(key); return <button type="button" className={enabled ? 'channel-choice selected' : 'channel-choice'} key={key} onClick={() => setDestinations(enabled ? destinations.filter((item) => item !== key) : [...destinations, key])}><Icon size={15}/>{meta.label}{enabled && <Check size={13}/>}</button> })}</div></div></div><div className="composer-actions"><button className="secondary-button" onClick={onClose}>Annuler</button><button className="primary-button" disabled={saving} onClick={submit}>{saving ? <LoaderCircle size={16} className="spin"/> : <CalendarDays size={16}/>}Programmer</button></div></div></div>
 }
 
-function PublicationEditor({ publication, onCancel, onSaved }) {
+function PublicationEditor({ publication, focusSchedule = false, onCancel, onSaved }) {
   const [title, setTitle] = useState(publication.title); const [caption, setCaption] = useState(publication.caption || ''); const [destinations, setDestinations] = useState(publication.destinations); const [scheduledAt, setScheduledAt] = useState(publication.scheduledAt ? toLocalInput(publication.scheduledAt) : ''); const [saving, setSaving] = useState(false); const [error, setError] = useState('')
   const submit = async (event) => { event.preventDefault(); if (!title.trim() || !destinations.length || !scheduledAt) { setError('Ajoutez un titre, une date et au moins une destination.'); return } setSaving(true); setError(''); try { const updated = await request(`/v1/publications/${publication._id}`, { method: 'PATCH', body: JSON.stringify({ workspaceId: WORKSPACE_ID, title: title.trim(), caption, destinations, scheduledAt: new Date(scheduledAt).toISOString() }) }); onSaved(updated) } catch (cause) { setError(cause.message) } finally { setSaving(false) } }
-  return <form className="studio-editor" onSubmit={submit}><span className="eyebrow">MODIFIER LA PUBLICATION</span>{error && <p className="form-error">{error}</p>}<label>Titre<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Titre de la publication"/></label><label>Planification<input type="datetime-local" min={toLocalInput(Date.now() + 60_000)} value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)}/></label><label>Légende<textarea value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Légende à publier" rows="5"/><small className={destinations.includes('x') && caption.length > 280 ? 'char-count over' : 'char-count'}>{caption.length}{destinations.includes('x') ? ' / 280 sur X' : ''}</small></label><div><span className="field-label">Destinations</span><div className="channel-selector">{Object.entries(platformMeta).map(([key, meta]) => { const Icon = meta.icon; const enabled = destinations.includes(key); return <button type="button" className={enabled ? 'channel-choice selected' : 'channel-choice'} key={key} onClick={() => setDestinations(enabled ? destinations.filter((item) => item !== key) : [...destinations, key])}><Icon size={15}/>{meta.label}{enabled && <Check size={13}/>}</button> })}</div></div><div className="composer-actions"><button type="button" className="secondary-button" onClick={onCancel}>Annuler</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle size={16} className="spin"/> : <CalendarDays size={16}/>}Enregistrer</button></div></form>
+  return <form className="studio-editor" onSubmit={submit}><span className="eyebrow">MODIFIER LA PUBLICATION</span>{error && <p className="form-error">{error}</p>}<label>Titre<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Titre de la publication"/></label><label>Planification<input type="datetime-local" autoFocus={focusSchedule} min={toLocalInput(Date.now() + 60_000)} value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)}/></label><label>Légende<textarea value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Légende à publier" rows="5"/><small className={destinations.includes('x') && caption.length > 280 ? 'char-count over' : 'char-count'}>{caption.length}{destinations.includes('x') ? ' / 280 sur X' : ''}</small></label><div><span className="field-label">Destinations</span><div className="channel-selector">{Object.entries(platformMeta).map(([key, meta]) => { const Icon = meta.icon; const enabled = destinations.includes(key); return <button type="button" className={enabled ? 'channel-choice selected' : 'channel-choice'} key={key} onClick={() => setDestinations(enabled ? destinations.filter((item) => item !== key) : [...destinations, key])}><Icon size={15}/>{meta.label}{enabled && <Check size={13}/>}</button> })}</div></div><div className="composer-actions"><button type="button" className="secondary-button" onClick={onCancel}>Annuler</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle size={16} className="spin"/> : <CalendarDays size={16}/>}Enregistrer</button></div></form>
 }
 
 function AssetPreview({ asset, library = false, large = false, thumbnail = false, playable = false, className = '' }) { const classes = `${library ? 'library-art' : 'media-art'} actual-asset ${large ? 'large' : ''} ${className}`; if (!asset) return <div className={`${classes} empty-art`}><Image size={18}/></div>; return <div className={classes}>{asset.kind === 'video' ? <video src={asset.publicUrl} autoPlay={thumbnail} loop={thumbnail} muted={!playable} controls={playable} playsInline preload={thumbnail || playable ? 'auto' : 'metadata'} /> : <img src={asset.publicUrl} alt={asset.name}/>} {asset.kind === 'video' && !playable && <span className="play-art"><Play size={library ? 14 : 12} fill="currentColor"/></span>}</div> }

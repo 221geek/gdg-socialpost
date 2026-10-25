@@ -26,6 +26,17 @@ export interface AssetComment {
   updatedAt: Date
 }
 
+export interface PublicationComment {
+  _id?: ObjectId
+  workspaceId: string
+  publicationId: ObjectId
+  authorId?: ObjectId
+  authorEmail: string
+  body: string
+  createdAt: Date
+  updatedAt: Date
+}
+
 export type DeliveryStatus = 'pending' | 'published' | 'failed'
 
 export interface Delivery {

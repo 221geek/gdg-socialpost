@@ -4,9 +4,13 @@ import { config } from './config.js'
 const connection = { url: config.REDIS_URL }
 export const publishQueue = new Queue('publication-dispatch', { connection })
 
-export async function queuePublication(publicationId: string, scheduledAt: Date) {
+export async function removePendingJobs(publicationId: string) {
   const pendingJobs = await publishQueue.getJobs(['delayed', 'waiting', 'prioritized'])
   await Promise.all(pendingJobs.filter((job) => job.data.publicationId === publicationId).map((job) => job.remove()))
+}
+
+export async function queuePublication(publicationId: string, scheduledAt: Date) {
+  await removePendingJobs(publicationId)
   const delay = Math.max(scheduledAt.getTime() - Date.now(), 0)
   // Each scheduling gets its own job: BullMQ silently ignores a jobId still held by a completed or failed job.
   // Double publishing is prevented by the atomic scheduled → dispatching claim in the worker.

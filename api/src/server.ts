@@ -15,8 +15,8 @@ import { decryptConnectionToken, encryptConnectionToken } from './connection-cry
 import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
 import { closeDatabase, db } from './database.js'
 import { logEvent, setDelivery, settlePublication } from './deliveries.js'
-import { queuePublication } from './queue.js'
-import { Asset, AssetComment, Connection, DeliveryEvent, platforms, Publication, User } from './types.js'
+import { queuePublication, removePendingJobs } from './queue.js'
+import { Asset, AssetComment, Connection, DeliveryEvent, platforms, Publication, PublicationComment, User } from './types.js'
 import { X_SCOPES } from './x-publisher.js'
 
 const app = Fastify({ logger: true })
@@ -27,6 +27,13 @@ await app.register(multipart, { limits: { fileSize: 2 * 1024 * 1024 * 1024, file
 await app.register(fastifyStatic, { root: config.UPLOAD_DIR, prefix: '/media/' })
 
 await ensureBootstrapOwner()
+
+// Validation failures are user errors: answer 422 with the first readable message instead of a raw 500.
+app.setErrorHandler((error: Error & { statusCode?: number }, request, reply) => {
+  if (error instanceof z.ZodError) return reply.code(422).send({ error: error.issues[0]?.message ?? 'Données invalides.' })
+  if ((error.statusCode ?? 500) >= 500) request.log.error(error)
+  return reply.code(error.statusCode ?? 500).send({ error: error.message })
+})
 
 declare module 'fastify' {
   interface FastifyRequest { authUser?: SessionUser }
@@ -67,6 +74,7 @@ const oauthState = z.object({
 
 const asId = (id: ObjectId | undefined) => id?.toHexString()
 const assetDto = (asset: Asset) => ({ ...asset, _id: asId(asset._id), createdAt: asset.createdAt.toISOString() })
+const publicationCommentDto = (comment: PublicationComment) => ({ ...comment, _id: asId(comment._id), publicationId: comment.publicationId.toHexString(), authorId: asId(comment.authorId), createdAt: comment.createdAt.toISOString(), updatedAt: comment.updatedAt.toISOString() })
 const assetCommentDto = (comment: AssetComment) => ({ ...comment, _id: asId(comment._id), assetId: comment.assetId.toHexString(), authorId: asId(comment.authorId), createdAt: comment.createdAt.toISOString(), updatedAt: comment.updatedAt.toISOString() })
 const publicationDto = (publication: Publication) => ({
   ...publication,
@@ -239,8 +247,13 @@ app.post('/v1/assets/:assetId/comments', async (request, reply) => {
 
 app.get('/v1/publications', async (request) => {
   const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
-  const data = await (await db()).collection<Publication>('publications').find({ workspaceId: id }).sort({ scheduledAt: 1, createdAt: -1 }).toArray()
-  return { data: data.map(publicationDto) }
+  const database = await db()
+  const [data, counts] = await Promise.all([
+    database.collection<Publication>('publications').find({ workspaceId: id }).sort({ scheduledAt: 1, createdAt: -1 }).toArray(),
+    database.collection<PublicationComment>('publicationComments').aggregate<{ _id: ObjectId, count: number }>([{ $match: { workspaceId: id } }, { $group: { _id: '$publicationId', count: { $sum: 1 } } }]).toArray(),
+  ])
+  const commentCount = new Map(counts.map((item) => [item._id.toHexString(), item.count]))
+  return { data: data.map((publication) => ({ ...publicationDto(publication), commentCount: commentCount.get(publication._id!.toHexString()) ?? 0 })) }
 })
 
 app.post('/v1/publications', async (request, reply) => {
@@ -292,6 +305,47 @@ app.post('/v1/publications/:id/publish-now', async (request, reply) => {
   return { data: publicationDto((await publications.findOne({ _id: current._id }))!) }
 })
 
+app.delete('/v1/publications/:id', async (request, reply) => {
+  const { id } = z.object({ id: objectId }).parse(request.params)
+  const { workspaceId: workspace } = z.object({ workspaceId }).parse(request.query)
+  const database = await db()
+  const current = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(id), workspaceId: workspace })
+  if (!current) return reply.code(404).send({ error: 'Publication introuvable.' })
+  if (current.status === 'dispatching' && !await isStaleDispatch(current)) return reply.code(409).send({ error: 'La diffusion est en cours : attendez la fin avant de supprimer cette publication.' })
+  await removePendingJobs(id)
+  const removed = await database.collection<Publication>('publications').deleteOne({ _id: current._id, status: current.status })
+  if (!removed.deletedCount) return reply.code(409).send({ error: 'La publication vient de changer d’état. Actualisez la page.' })
+  await Promise.all([
+    database.collection('deliveryEvents').deleteMany({ publicationId: id }),
+    database.collection('publicationComments').deleteMany({ publicationId: current._id }),
+  ])
+  request.log.info({ publicationId: id, by: request.authUser!.email }, 'Publication deleted')
+  return reply.code(204).send()
+})
+
+app.get('/v1/publications/:id/comments', async (request, reply) => {
+  const { id } = z.object({ id: objectId }).parse(request.params)
+  const { workspaceId: workspace } = z.object({ workspaceId }).parse(request.query)
+  const database = await db()
+  const publication = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(id), workspaceId: workspace }, { projection: { _id: 1 } })
+  if (!publication) return reply.code(404).send({ error: 'Publication introuvable.' })
+  const comments = await database.collection<PublicationComment>('publicationComments').find({ publicationId: publication._id, workspaceId: workspace }).sort({ createdAt: 1 }).toArray()
+  return { data: comments.map(publicationCommentDto) }
+})
+
+app.post('/v1/publications/:id/comments', async (request, reply) => {
+  const { id } = z.object({ id: objectId }).parse(request.params)
+  const input = z.object({ workspaceId, body: z.string().trim().min(1, 'Écrivez un commentaire.').max(2_000) }).parse(request.body)
+  const database = await db()
+  const publication = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(id), workspaceId: input.workspaceId }, { projection: { _id: 1 } })
+  if (!publication) return reply.code(404).send({ error: 'Publication introuvable.' })
+  const now = new Date()
+  const author = request.authUser!
+  const comment: PublicationComment = { workspaceId: input.workspaceId, publicationId: publication._id!, authorId: author._id, authorEmail: author.email, body: input.body, createdAt: now, updatedAt: now }
+  const result = await database.collection<PublicationComment>('publicationComments').insertOne(comment)
+  return reply.code(201).send({ data: publicationCommentDto({ ...comment, _id: result.insertedId }) })
+})
+
 app.get('/v1/publications/:id/events', async (request, reply) => {
   const { id } = z.object({ id: objectId }).parse(request.params)
   const { workspaceId: workspace } = z.object({ workspaceId }).parse(request.query)
@@ -313,8 +367,11 @@ app.patch('/v1/publications/:id', async (request, reply) => {
   }).parse(request.body)
   if (input.scheduledAt.getTime() < Date.now() - 60_000) return reply.code(422).send({ error: 'La date de planification doit être dans le futur.' })
   const database = await db()
+  const current = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(id), workspaceId: input.workspaceId })
+  const editable: Publication['status'][] = ['draft', 'scheduled', 'failed']
+  if (current && await isStaleDispatch(current)) editable.push('dispatching')
   const publication = await database.collection<Publication>('publications').findOneAndUpdate(
-    { _id: new ObjectId(id), workspaceId: input.workspaceId, status: { $in: ['draft', 'scheduled', 'failed'] } },
+    { _id: new ObjectId(id), workspaceId: input.workspaceId, status: { $in: editable } },
     { $set: { title: input.title, caption: input.caption, destinations: input.destinations, scheduledAt: input.scheduledAt, status: 'scheduled', updatedAt: new Date() } },
     { returnDocument: 'after' },
   )

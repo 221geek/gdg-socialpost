@@ -33,3 +33,11 @@
 - [ ] Ajouter X_CLIENT_ID / X_CLIENT_SECRET au service worker dans Coolify
 - [ ] Ajouter `media.write` aux permissions de l'app dans la console X si nécessaire, puis reconnecter X dans Paramètres
 - [ ] Déployer API + worker + frontend, puis « Relancer » la publication de 13 h
+
+## [2026-10-25] Supprimer, reprogrammer, discussion par publication
+- [x] API : `DELETE /v1/publications/:id` (retire le job, le journal et la discussion ; refusé pendant une diffusion active)
+- [x] API : reprogrammer (PATCH) aussi une diffusion bloquée > 20 min
+- [x] API : `GET/POST /v1/publications/:id/comments` + `commentCount` dans la liste
+- [x] API : erreurs de validation → 422 lisible (au lieu d'un 500 brut)
+- [x] UI : fenêtre à 3 colonnes (vidéo · contenu + journal · actions + discussion), Reprogrammer, Supprimer
+- [x] Testé en local : 2 comptes qui commentent, reprogrammation d'une publication bloquée, suppression (job Redis retiré)
