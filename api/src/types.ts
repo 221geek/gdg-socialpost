@@ -1,6 +1,6 @@
 import { ObjectId } from 'mongodb'
 
-export const platforms = ['instagram', 'tiktok', 'linkedin', 'youtube'] as const
+export const platforms = ['instagram', 'tiktok', 'linkedin', 'youtube', 'x'] as const
 export type Platform = typeof platforms[number]
 export type PublicationStatus = 'draft' | 'scheduled' | 'dispatching' | 'published' | 'failed'
 

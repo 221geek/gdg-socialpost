@@ -32,6 +32,12 @@ Utilisez [.env.remote.example](./.env.remote.example) pour faire pointer l’API
 
 Les branches de publication attendent les applications développeur et autorisations OAuth de Meta/Instagram, TikTok, LinkedIn et Google/YouTube. Ces comptes ne doivent jamais être ajoutés au dépôt : configurez-les uniquement comme credentials chiffrés dans n8n.
 
+### X
+
+Relay prend en charge OAuth 2.0 avec PKCE pour X. Dans la console X, activez l’authentification utilisateur OAuth 2.0, choisissez une application Web confidentielle et déclarez l’URL de rappel `https://api-gdg-relay.abdoulazizdione.cloud/v1/auth/x/callback`. Ajoutez `X_CLIENT_ID` et `X_CLIENT_SECRET` dans l’application API Coolify (jamais dans le dépôt). Les scopes requis sont `tweet.read`, `tweet.write`, `users.read` et `offline.access`.
+
+Le workflow n8n récupère à l’exécution le jeton X chiffré via `GET /v1/internal/connections/x/token?workspaceId=default`. Il doit ensuite téléverser le média auprès de X, publier le post, puis appeler le callback de livraison de Relay.
+
 ## Contrat d’API initial
 
 | Route | Usage |

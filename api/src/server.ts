@@ -30,7 +30,7 @@ declare module 'fastify' {
   interface FastifyRequest { authUser?: SessionUser }
 }
 
-const publicPath = (path: string) => path === '/health' || path.startsWith('/media/') || path.startsWith('/v1/internal/') || path === '/v1/auth/session' || path === '/v1/auth/activate' || path === '/v1/auth/instagram/callback'
+const publicPath = (path: string) => path === '/health' || path.startsWith('/media/') || path.startsWith('/v1/internal/') || path === '/v1/auth/session' || path === '/v1/auth/activate' || path === '/v1/auth/instagram/callback' || path === '/v1/auth/x/callback'
 
 app.addHook('onRequest', async (request, reply) => {
   if (publicPath(request.url.split('?')[0])) return
@@ -58,7 +58,8 @@ const publicationInput = z.object({
 const oauthState = z.object({
   workspaceId,
   stateHash: z.string(),
-  provider: z.literal('instagram'),
+  provider: z.enum(['instagram', 'x']),
+  verifierCiphertext: z.string().optional(),
   expiresAt: z.date(),
 })
 
@@ -306,13 +307,95 @@ app.get('/v1/auth/instagram/callback', async (request, reply) => {
   return reply.redirect(resultUrl.toString())
 })
 
+const base64Url = (value: Buffer) => value.toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+
+app.get('/v1/auth/x', async (request, reply) => {
+  if (!config.X_CLIENT_ID || !config.X_CLIENT_SECRET) {
+    return reply.code(503).send({ error: 'La connexion X n’est pas encore configurée sur le serveur.' })
+  }
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  const state = randomBytes(32).toString('base64url')
+  const verifier = randomBytes(48).toString('base64url')
+  await (await db()).collection('oauthStates').insertOne(oauthState.parse({
+    workspaceId: id,
+    stateHash: createHash('sha256').update(state).digest('hex'),
+    provider: 'x',
+    verifierCiphertext: encryptConnectionToken(verifier),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  }))
+  const authorizationUrl = new URL('https://x.com/i/oauth2/authorize')
+  authorizationUrl.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: config.X_CLIENT_ID,
+    redirect_uri: config.X_REDIRECT_URI,
+    scope: 'tweet.read tweet.write users.read offline.access',
+    state,
+    code_challenge: base64Url(createHash('sha256').update(verifier).digest()),
+    code_challenge_method: 'S256',
+  }).toString()
+  return reply.redirect(authorizationUrl.toString())
+})
+
+app.get('/v1/auth/x/callback', async (request, reply) => {
+  const query = z.object({ code: z.string().optional(), state: z.string().optional(), error: z.string().optional() }).parse(request.query)
+  const resultUrl = new URL(config.WEB_ORIGIN)
+  resultUrl.searchParams.set('settings', 'connections')
+  if (query.error || !query.code || !query.state || !config.X_CLIENT_ID || !config.X_CLIENT_SECRET) {
+    resultUrl.searchParams.set('notice', 'x-error')
+    return reply.redirect(resultUrl.toString())
+  }
+  const stateHash = createHash('sha256').update(query.state).digest('hex')
+  const pending = await (await db()).collection('oauthStates').findOneAndDelete({ stateHash, provider: 'x', expiresAt: { $gt: new Date() } })
+  if (!pending?.verifierCiphertext) {
+    resultUrl.searchParams.set('notice', 'x-error')
+    return reply.redirect(resultUrl.toString())
+  }
+  try {
+    const form = new URLSearchParams({
+      grant_type: 'authorization_code', code: query.code, redirect_uri: config.X_REDIRECT_URI,
+      client_id: config.X_CLIENT_ID, code_verifier: decryptConnectionToken(pending.verifierCiphertext),
+    })
+    const exchange = await fetch('https://api.x.com/2/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        authorization: `Basic ${Buffer.from(`${config.X_CLIENT_ID}:${config.X_CLIENT_SECRET}`).toString('base64')}`,
+      },
+      body: form,
+    })
+    const token = await exchange.json() as { access_token?: string, refresh_token?: string, expires_in?: number, error_description?: string }
+    if (!exchange.ok || !token.access_token) throw new Error(token.error_description || 'Échange du code X refusé.')
+    const profileResponse = await fetch('https://api.x.com/2/users/me', { headers: { authorization: `Bearer ${token.access_token}` } })
+    const profile = profileResponse.ok ? await profileResponse.json() as { data?: { id?: string, name?: string, username?: string } } : {}
+    const now = new Date()
+    await (await db()).collection<Connection>('connections').updateOne(
+      { workspaceId: pending.workspaceId as string, platform: 'x' },
+      { $set: {
+        accountName: profile.data?.username ? `@${profile.data.username}` : profile.data?.name || 'Compte X',
+        externalAccountId: profile.data?.id,
+        tokenCiphertext: encryptConnectionToken(JSON.stringify({ accessToken: token.access_token, refreshToken: token.refresh_token })),
+        tokenExpiresAt: token.expires_in ? new Date(now.getTime() + token.expires_in * 1000) : undefined,
+        connectedAt: now, updatedAt: now,
+      } },
+      { upsert: true },
+    )
+    resultUrl.searchParams.set('notice', 'x-connected')
+  } catch (error) {
+    app.log.error(error, 'X OAuth callback failed')
+    resultUrl.searchParams.set('notice', 'x-error')
+  }
+  return reply.redirect(resultUrl.toString())
+})
+
 app.get('/v1/internal/connections/:platform/token', async (request, reply) => {
   if (request.headers['x-relay-secret'] !== config.N8N_SHARED_SECRET) return reply.code(401).send({ error: 'Non autorisé' })
-  const { platform } = z.object({ platform: z.literal('instagram') }).parse(request.params)
+  const { platform } = z.object({ platform: z.enum(['instagram', 'x']) }).parse(request.params)
   const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
   const connection = await (await db()).collection<Connection>('connections').findOne({ workspaceId: id, platform })
-  if (!connection?.tokenCiphertext) return reply.code(404).send({ error: 'Aucun compte Instagram connecté.' })
-  return { data: { accessToken: decryptConnectionToken(connection.tokenCiphertext), accountId: connection.externalAccountId, expiresAt: connection.tokenExpiresAt?.toISOString() } }
+  if (!connection?.tokenCiphertext) return reply.code(404).send({ error: 'Aucun compte connecté.' })
+  const decrypted = decryptConnectionToken(connection.tokenCiphertext)
+  const stored = platform === 'x' ? z.object({ accessToken: z.string(), refreshToken: z.string().optional() }).parse(JSON.parse(decrypted)) : { accessToken: decrypted }
+  return { data: { ...stored, accountId: connection.externalAccountId, expiresAt: connection.tokenExpiresAt?.toISOString() } }
 })
 
 app.get('/v1/dashboard', async (request) => {
