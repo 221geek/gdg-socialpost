@@ -223,11 +223,10 @@ app.get('/v1/connections', async (request) => {
   }) }
 })
 
-app.get('/v1/auth/instagram', async (request, reply) => {
+const createInstagramAuthorizationUrl = async (id: string) => {
   if (!config.INSTAGRAM_APP_ID || !config.INSTAGRAM_APP_SECRET) {
-    return reply.code(503).send({ error: 'La connexion Instagram n’est pas encore configurée sur le serveur.' })
+    throw Object.assign(new Error('La connexion Instagram n’est pas encore configurée sur le serveur.'), { statusCode: 503 })
   }
-  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
   const state = randomBytes(32).toString('base64url')
   await (await db()).collection('oauthStates').insertOne(oauthState.parse({
     workspaceId: id,
@@ -243,7 +242,17 @@ app.get('/v1/auth/instagram', async (request, reply) => {
     scope: 'instagram_business_basic,instagram_business_content_publish',
     state,
   }).toString()
-  return reply.redirect(authorizationUrl.toString())
+  return authorizationUrl.toString()
+}
+
+app.get('/v1/auth/instagram', async (request, reply) => {
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  return reply.redirect(await createInstagramAuthorizationUrl(id))
+})
+
+app.post('/v1/auth/instagram', async (request) => {
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  return { data: { authorizationUrl: await createInstagramAuthorizationUrl(id) } }
 })
 
 app.get('/v1/auth/instagram/callback', async (request, reply) => {
@@ -309,11 +318,10 @@ app.get('/v1/auth/instagram/callback', async (request, reply) => {
 
 const base64Url = (value: Buffer) => value.toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
 
-app.get('/v1/auth/x', async (request, reply) => {
+const createXAuthorizationUrl = async (id: string) => {
   if (!config.X_CLIENT_ID || !config.X_CLIENT_SECRET) {
-    return reply.code(503).send({ error: 'La connexion X n’est pas encore configurée sur le serveur.' })
+    throw Object.assign(new Error('La connexion X n’est pas encore configurée sur le serveur.'), { statusCode: 503 })
   }
-  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
   const state = randomBytes(32).toString('base64url')
   const verifier = randomBytes(48).toString('base64url')
   await (await db()).collection('oauthStates').insertOne(oauthState.parse({
@@ -333,7 +341,17 @@ app.get('/v1/auth/x', async (request, reply) => {
     code_challenge: base64Url(createHash('sha256').update(verifier).digest()),
     code_challenge_method: 'S256',
   }).toString()
-  return reply.redirect(authorizationUrl.toString())
+  return authorizationUrl.toString()
+}
+
+app.get('/v1/auth/x', async (request, reply) => {
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  return reply.redirect(await createXAuthorizationUrl(id))
+})
+
+app.post('/v1/auth/x', async (request) => {
+  const { workspaceId: id } = z.object({ workspaceId }).parse(request.query)
+  return { data: { authorizationUrl: await createXAuthorizationUrl(id) } }
 })
 
 app.get('/v1/auth/x/callback', async (request, reply) => {
