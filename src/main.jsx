@@ -10,6 +10,7 @@ import './styles.css'
 import './pages.css'
 import './type.css'
 import './live.css'
+import './profile.css'
 
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '')
 const N8N_URL = 'https://n8n-gdg.abdoulazizdione.cloud'
@@ -23,7 +24,8 @@ const platformMeta = {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API_URL}${path}`, { credentials: 'include', ...options, headers: { ...(options.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...options.headers } })
+  const hasJsonBody = options.body !== undefined && !(options.body instanceof FormData)
+  const response = await fetch(`${API_URL}${path}`, { credentials: 'include', ...options, headers: { ...(hasJsonBody ? { 'content-type': 'application/json' } : {}), ...options.headers } })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) { const error = new Error(payload.error || 'Une erreur est survenue.'); error.code = payload.code; throw error }
   return payload.data
@@ -112,7 +114,7 @@ function Workspace({ session, onSignedOut }) {
       </nav>
       <div className="sidebar-label">ESPACE</div>
       <div className="space-line"><span className="space-dot mint"></span> Données réelles</div>
-      <div className="sidebar-bottom"><Nav icon={Settings2} label="Paramètres" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} /><div className="profile"><span className="avatar">R</span><span><b>{session.email}</b><small>{session.role === 'owner' ? 'Administrateur' : 'Membre'}</small></span></div></div>
+      <div className="sidebar-bottom"><Nav icon={Settings2} label="Paramètres" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} /><div className="profile"><span className="avatar">R</span><span className="profile-details"><b>{session.email}</b><small>{session.role === 'owner' ? 'Administrateur' : 'Membre'}</small></span></div></div>
     </aside>
     <main className="main-content">
       <header className="topbar"><div className="crumb"><span>Relay</span><ChevronRight size={15}/><b>{pageTitle}</b></div><div className="header-actions"><button className="icon-button" onClick={refresh} aria-label="Actualiser"><RefreshCw size={17}/></button><button className="primary-button" onClick={() => setComposerOpen(true)}><Plus size={18}/>Créer une publication</button></div></header>
