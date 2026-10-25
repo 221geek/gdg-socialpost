@@ -6,7 +6,7 @@ let database: Db | undefined
 
 export async function db() {
   if (!database) {
-    client = new MongoClient(config.MONGODB_URI)
+    client = new MongoClient(config.MONGODB_URI, { ignoreUndefined: true })
     await client.connect()
     database = client.db()
     await database.collection('assets').createIndex({ workspaceId: 1, createdAt: -1 })

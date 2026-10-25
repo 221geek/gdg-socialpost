@@ -34,9 +34,11 @@ Les branches de publication attendent les applications développeur et autorisat
 
 ### X
 
-Relay prend en charge OAuth 2.0 avec PKCE pour X. Dans la console X, activez l’authentification utilisateur OAuth 2.0, choisissez une application Web confidentielle et déclarez l’URL de rappel `https://api-gdg-relay.abdoulazizdione.cloud/v1/auth/x/callback`. Ajoutez `X_CLIENT_ID` et `X_CLIENT_SECRET` dans l’application API Coolify (jamais dans le dépôt). Les scopes requis sont `tweet.read`, `tweet.write`, `users.read` et `offline.access`.
+Relay prend en charge OAuth 2.0 avec PKCE pour X. Dans la console X, activez l’authentification utilisateur OAuth 2.0, choisissez une application Web confidentielle et déclarez l’URL de rappel `https://api-gdg-relay.abdoulazizdione.cloud/v1/auth/x/callback`. Les scopes demandés sont `tweet.read`, `tweet.write`, `users.read`, `media.write` (envoi de vidéos) et `offline.access` (rafraîchissement du jeton).
 
-Le workflow n8n récupère à l’exécution le jeton X chiffré via `GET /v1/internal/connections/x/token?workspaceId=default`. Il doit ensuite téléverser le média auprès de X, publier le post, puis appeler le callback de livraison de Relay.
+**Le worker publie directement sur X**, sans passer par n8n : il rafraîchit le jeton (valable ~2 h), envoie le média par segments (`/2/media/upload/initialize|append|finalize`), attend la fin du traitement, puis crée le post (`POST /2/tweets`). Ajoutez `X_CLIENT_ID` et `X_CLIENT_SECRET` à l’API **et au worker** dans Coolify (jamais dans le dépôt). Les autres réseaux continuent de passer par le webhook n8n.
+
+Chaque étape est consignée dans `deliveryEvents` (visible dans **Publications → Détails et journal**) et écrite en JSON sur la sortie standard du worker (`"scope":"delivery"`, visible dans les logs Coolify). Les erreurs transitoires (429, 5xx, réseau) sont relancées automatiquement jusqu’à 5 fois ; les erreurs définitives (scope manquant, contenu refusé) passent la publication en échec avec le message de X. Une diffusion bloquée plus de 20 minutes peut être relancée depuis le back-office ; une destination déjà publiée n’est jamais republiée.
 
 ## Contrat d’API initial
 
@@ -47,6 +49,9 @@ Le workflow n8n récupère à l’exécution le jeton X chiffré via `GET /v1/in
 | `POST /v1/assets/upload` | Importer une image ou une vidéo dans le volume de l’API |
 | `GET/POST /v1/publications` | Lire et créer les brouillons |
 | `POST /v1/publications/:id/schedule` | Programmer une publication et créer le job différé |
+| `PATCH /v1/publications/:id` | Modifier le contenu, les destinations et la date |
+| `POST /v1/publications/:id/publish-now` | Diffuser immédiatement, relancer un échec ou une diffusion bloquée |
+| `GET /v1/publications/:id/events` | Journal de diffusion de la publication |
 | `POST /v1/internal/deliveries/:publicationId` | Callback sécurisé de n8n par plateforme |
 
 Les fichiers ne transitent pas par MongoDB. Par défaut, ils sont enregistrés dans le volume persistant de l’API (`UPLOAD_DIR`) et servis sous `/media`. Pour plusieurs instances de l’API, remplacez cet adaptateur par un stockage objet S3/R2 : MongoDB reste dédiée aux métadonnées et aux requêtes produit.

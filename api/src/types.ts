@@ -26,6 +26,29 @@ export interface AssetComment {
   updatedAt: Date
 }
 
+export type DeliveryStatus = 'pending' | 'published' | 'failed'
+
+export interface Delivery {
+  status: DeliveryStatus
+  externalPostId?: string
+  externalUrl?: string
+  error?: string
+  updatedAt: Date
+}
+
+export interface DeliveryEvent {
+  _id?: ObjectId
+  publicationId: string
+  platform?: Platform
+  level: 'info' | 'warn' | 'error'
+  step: string
+  message: string
+  status?: 'published' | 'failed'
+  externalPostId?: string
+  attempt?: number
+  createdAt: Date
+}
+
 export interface Publication {
   _id?: ObjectId
   workspaceId: string
@@ -36,6 +59,9 @@ export interface Publication {
   status: PublicationStatus
   scheduledAt?: Date
   publishedAt?: Date
+  dispatchStartedAt?: Date
+  deliveries?: Partial<Record<Platform, Delivery>>
+  lastError?: string
   createdAt: Date
   updatedAt: Date
 }
@@ -48,6 +74,7 @@ export interface Connection {
   externalAccountId?: string
   tokenCiphertext?: string
   tokenExpiresAt?: Date
+  scopes?: string[]
   connectedAt?: Date
   updatedAt: Date
 }

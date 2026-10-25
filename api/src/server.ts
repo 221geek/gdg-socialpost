@@ -14,12 +14,14 @@ import { config } from './config.js'
 import { decryptConnectionToken, encryptConnectionToken } from './connection-crypto.js'
 import { authenticatedUser, clearSessionCookie, createSession, ensureBootstrapOwner, hashPassword, isOwner, normalizeEmail, passwordMatches, revokeSession, roleFrom, setSessionCookie, userDto, type SessionUser } from './auth.js'
 import { closeDatabase, db } from './database.js'
+import { logEvent, setDelivery, settlePublication } from './deliveries.js'
 import { queuePublication } from './queue.js'
-import { Asset, AssetComment, Connection, platforms, Publication, User } from './types.js'
+import { Asset, AssetComment, Connection, DeliveryEvent, platforms, Publication, User } from './types.js'
+import { X_SCOPES } from './x-publisher.js'
 
 const app = Fastify({ logger: true })
 await mkdir(config.UPLOAD_DIR, { recursive: true })
-await app.register(cors, { origin: config.WEB_ORIGIN, credentials: true })
+await app.register(cors, { origin: config.WEB_ORIGIN, credentials: true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'] })
 await app.register(rateLimit, { global: false })
 await app.register(multipart, { limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 1 } })
 await app.register(fastifyStatic, { root: config.UPLOAD_DIR, prefix: '/media/' })
@@ -72,9 +74,29 @@ const publicationDto = (publication: Publication) => ({
   assetId: publication.assetId.toHexString(),
   scheduledAt: publication.scheduledAt?.toISOString(),
   publishedAt: publication.publishedAt?.toISOString(),
+  dispatchStartedAt: publication.dispatchStartedAt?.toISOString(),
+  deliveries: Object.fromEntries(Object.entries(publication.deliveries ?? {}).map(([platform, delivery]) => [platform, { ...delivery, updatedAt: delivery.updatedAt.toISOString() }])),
   createdAt: publication.createdAt.toISOString(),
   updatedAt: publication.updatedAt.toISOString(),
 })
+
+const utc = (date: Date) => `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+const STALE_DISPATCH_MS = 20 * 60 * 1000
+
+// Before a new dispatch run, forget failed or pending deliveries but keep the ones already published,
+// so a relaunch never posts twice on the same network.
+async function clearUnfinishedDeliveries(publication: Publication) {
+  const unfinished = Object.entries(publication.deliveries ?? {}).filter(([, delivery]) => delivery.status !== 'published').map(([platform]) => `deliveries.${platform}`)
+  if (!unfinished.length) return
+  await (await db()).collection<Publication>('publications').updateOne({ _id: publication._id }, { $unset: Object.fromEntries(unfinished.map((key) => [key, ''])) })
+}
+
+async function isStaleDispatch(publication: Publication) {
+  if (publication.status !== 'dispatching') return false
+  const last = await (await db()).collection<DeliveryEvent>('deliveryEvents').findOne({ publicationId: publication._id!.toHexString() }, { sort: { createdAt: -1 } })
+  const lastActivity = Math.max(publication.updatedAt.getTime(), last?.createdAt.getTime() ?? 0)
+  return Date.now() - lastActivity > STALE_DISPATCH_MS
+}
 
 app.get('/health', async () => {
   await (await db()).command({ ping: 1 })
@@ -242,8 +264,42 @@ app.post('/v1/publications/:id/schedule', async (request, reply) => {
     { returnDocument: 'after' },
   )
   if (!publication) return reply.code(404).send({ error: 'Publication introuvable ou non planifiable.' })
+  await clearUnfinishedDeliveries(publication)
   await queuePublication(id, scheduledAt)
+  await logEvent(database, id, { level: 'info', step: 'scheduled', message: `Programmée pour le ${utc(scheduledAt)}.` })
   return { data: publicationDto(publication) }
+})
+
+app.post('/v1/publications/:id/publish-now', async (request, reply) => {
+  const { id } = z.object({ id: objectId }).parse(request.params)
+  const { workspaceId: workspace } = z.object({ workspaceId }).parse(request.body)
+  const database = await db()
+  const publications = database.collection<Publication>('publications')
+  const current = await publications.findOne({ _id: new ObjectId(id), workspaceId: workspace })
+  if (!current) return reply.code(404).send({ error: 'Publication introuvable.' })
+  if (current.status === 'published') return reply.code(409).send({ error: 'Cette publication est déjà diffusée.' })
+  if (current.status === 'dispatching' && !await isStaleDispatch(current)) return reply.code(409).send({ error: 'La diffusion est en cours. Consultez le journal ; la relance sera possible si elle reste bloquée plus de 20 minutes.' })
+  const now = new Date()
+  const publication = await publications.findOneAndUpdate(
+    { _id: current._id, status: current.status },
+    { $set: { status: 'scheduled', scheduledAt: now, updatedAt: now }, $unset: { lastError: '' } },
+    { returnDocument: 'after' },
+  )
+  if (!publication) return reply.code(409).send({ error: 'La publication vient de changer d’état. Actualisez la page.' })
+  await clearUnfinishedDeliveries(publication)
+  await queuePublication(id, now)
+  await logEvent(database, id, { level: current.status === 'dispatching' ? 'warn' : 'info', step: 'scheduled', message: current.status === 'dispatching' ? `Relance manuelle par ${request.authUser!.email} d’une diffusion bloquée.` : `Diffusion immédiate demandée par ${request.authUser!.email}.` })
+  return { data: publicationDto((await publications.findOne({ _id: current._id }))!) }
+})
+
+app.get('/v1/publications/:id/events', async (request, reply) => {
+  const { id } = z.object({ id: objectId }).parse(request.params)
+  const { workspaceId: workspace } = z.object({ workspaceId }).parse(request.query)
+  const database = await db()
+  const publication = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(id), workspaceId: workspace }, { projection: { _id: 1 } })
+  if (!publication) return reply.code(404).send({ error: 'Publication introuvable.' })
+  const events = await database.collection<DeliveryEvent>('deliveryEvents').find({ publicationId: id }).sort({ createdAt: 1, _id: 1 }).limit(500).toArray()
+  return { data: events.map((event) => ({ ...event, _id: asId(event._id), createdAt: event.createdAt.toISOString() })) }
 })
 
 app.patch('/v1/publications/:id', async (request, reply) => {
@@ -263,7 +319,9 @@ app.patch('/v1/publications/:id', async (request, reply) => {
     { returnDocument: 'after' },
   )
   if (!publication) return reply.code(404).send({ error: 'Publication introuvable ou déjà en cours de diffusion.' })
+  await clearUnfinishedDeliveries(publication)
   await queuePublication(id, input.scheduledAt)
+  await logEvent(database, id, { level: 'info', step: 'scheduled', message: `Modifiée par ${request.authUser!.email}, programmée pour le ${utc(input.scheduledAt)}.` })
   return { data: publicationDto(publication) }
 })
 
@@ -389,7 +447,7 @@ const createXAuthorizationUrl = async (id: string) => {
     response_type: 'code',
     client_id: config.X_CLIENT_ID,
     redirect_uri: config.X_REDIRECT_URI,
-    scope: 'tweet.read tweet.write users.read offline.access',
+    scope: X_SCOPES.join(' '),
     state,
     code_challenge: base64Url(createHash('sha256').update(verifier).digest()),
     code_challenge_method: 'S256',
@@ -434,7 +492,7 @@ app.get('/v1/auth/x/callback', async (request, reply) => {
       },
       body: form,
     })
-    const token = await exchange.json() as { access_token?: string, refresh_token?: string, expires_in?: number, error_description?: string }
+    const token = await exchange.json() as { access_token?: string, refresh_token?: string, expires_in?: number, scope?: string, error_description?: string }
     if (!exchange.ok || !token.access_token) throw new Error(token.error_description || 'Échange du code X refusé.')
     const profileResponse = await fetch('https://api.x.com/2/users/me', { headers: { authorization: `Bearer ${token.access_token}` } })
     const profile = profileResponse.ok ? await profileResponse.json() as { data?: { id?: string, name?: string, username?: string } } : {}
@@ -446,6 +504,7 @@ app.get('/v1/auth/x/callback', async (request, reply) => {
         externalAccountId: profile.data?.id,
         tokenCiphertext: encryptConnectionToken(JSON.stringify({ accessToken: token.access_token, refreshToken: token.refresh_token })),
         tokenExpiresAt: token.expires_in ? new Date(now.getTime() + token.expires_in * 1000) : undefined,
+        scopes: token.scope ? token.scope.split(' ') : X_SCOPES,
         connectedAt: now, updatedAt: now,
       } },
       { upsert: true },
@@ -498,13 +557,10 @@ app.post('/v1/internal/deliveries/:publicationId', async (request, reply) => {
   const { publicationId } = z.object({ publicationId: objectId }).parse(request.params)
   const input = z.object({ platform: z.enum(platforms), status: z.enum(['published', 'failed']), externalPostId: z.string().optional(), error: z.string().optional() }).parse(request.body)
   const database = await db()
-  await database.collection('deliveryEvents').insertOne({ publicationId, ...input, createdAt: new Date() })
-  if (input.status === 'failed') await database.collection<Publication>('publications').updateOne({ _id: new ObjectId(publicationId) }, { $set: { status: 'failed', updatedAt: new Date() } })
-  if (input.status === 'published') {
-    const publication = await database.collection<Publication>('publications').findOne({ _id: new ObjectId(publicationId) })
-    const delivered = await database.collection('deliveryEvents').distinct('platform', { publicationId, status: 'published' })
-    if (publication && delivered.length === publication.destinations.length) await database.collection<Publication>('publications').updateOne({ _id: publication._id }, { $set: { status: 'published', publishedAt: new Date(), updatedAt: new Date() } })
-  }
+  const id = new ObjectId(publicationId)
+  await setDelivery(database, id, input.platform, { status: input.status, externalPostId: input.externalPostId, error: input.error })
+  await logEvent(database, publicationId, { platform: input.platform, level: input.status === 'failed' ? 'error' : 'info', step: 'callback', status: input.status, externalPostId: input.externalPostId, message: input.status === 'published' ? `n8n confirme la publication${input.externalPostId ? ` (${input.externalPostId})` : ''}.` : `n8n signale un échec : ${input.error || 'sans détail'}` })
+  await settlePublication(database, id)
   return reply.code(202).send({ accepted: true })
 })
 
